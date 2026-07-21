@@ -1,0 +1,31 @@
+# crap2rss configuration
+# Run: python3 crap2rss.py
+
+settings:
+  max_items: 20          # articles per feed
+  output_dir: ./feeds    # where to write .xml files
+
+feeds:
+  - name: Pillar Security Blog
+    url: https://www.pillar.security/blog
+    output: pillar.xml
+
+  - name: Sekoia Blog
+    url: https://www.sekoia.com/blog
+    output: sekoia.xml
+
+  - name: AAIF Blog
+    url: https://aaif.io/blog
+    output: aaif.xml
+
+  - name: Apple Security Research
+    url: https://security.apple.com/blog
+    output: apple.xml
+
+  - name: Crowdstrike
+    url: https://www.crowdstrike.com/en-us/blog/
+    output: clownstrike.xml
+
+  - name: BC Security
+    url: https://bcsecurity.io/blog/
+    output: bcsecurity.xml

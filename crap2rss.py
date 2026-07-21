@@ -327,22 +327,134 @@ MIN_SLUG_LENGTH = 5
 MIN_LINK_TEXT_LENGTH = 10
 
 
-def scrape_index(blog_url: str, max_items: int = 25) -> list[dict[str, str]]:
-    """Scrape the blog index page.
+# ── __NEXT_DATA__ fallback ──────────────────────────────────────────────────
+#
+# Some blogs (e.g. security.apple.com/blog) render their post list entirely
+# client-side from JSON embedded in a Next.js `__NEXT_DATA__` script tag,
+# with no <a href> markup for individual posts anywhere in the raw HTML. The
+# anchor-based scrape above finds nothing on those pages, so when it comes up
+# empty we fall back to hunting through that embedded JSON for a list that
+# looks like a set of blog posts.
 
-    Returns list of {url, title, date_str} sorted newest-first.
+NEXTDATA_TITLE_KEYS = ("title", "headline", "name")
+NEXTDATA_LINK_KEYS = ("slug", "url", "link", "path")
+NEXTDATA_DATE_KEYS = ("date", "publishedat", "published", "publishdate")
+NEXTDATA_DESCRIPTION_KEYS = ("description", "excerpt", "summary")
+NEXTDATA_DATE_BONUS = 100
+NEXTDATA_DESCRIPTION_BONUS = 50
+
+
+def find_nextdata_json(soup: BeautifulSoup) -> Any:
+    """Return the parsed payload of a Next.js __NEXT_DATA__ script tag, if any."""
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if not isinstance(tag, Tag) or not tag.string:
+        return None
+    try:
+        return json.loads(tag.string)
+    except json.JSONDecodeError:
+        return None
+
+
+def find_nextdata_post_lists(node: Any) -> list[list[dict[str, Any]]]:
+    """Recursively collect lists of dicts that look like blog post entries."""
+    candidates: list[list[dict[str, Any]]] = []
+    if isinstance(node, dict):
+        for value in node.values():
+            candidates.extend(find_nextdata_post_lists(value))
+    elif isinstance(node, list):
+        if node and all(isinstance(item, dict) for item in node):
+            sample_keys = {str(k).lower() for k in node[0]}
+            has_title = any(k in sample_keys for k in NEXTDATA_TITLE_KEYS)
+            has_link = any(k in sample_keys for k in NEXTDATA_LINK_KEYS)
+            if has_title and has_link:
+                candidates.append(cast("list[dict[str, Any]]", node))
+        for item in node:
+            candidates.extend(find_nextdata_post_lists(item))
+    return candidates
+
+
+def score_nextdata_post_list(items: list[dict[str, Any]]) -> int:
+    """Rank a candidate post list by how much it looks like a full post index."""
+    sample_keys = {str(k).lower() for k in items[0]}
+    score = len(items)
+    if any(k in sample_keys for k in NEXTDATA_DATE_KEYS):
+        score += NEXTDATA_DATE_BONUS
+    if any(k in sample_keys for k in NEXTDATA_DESCRIPTION_KEYS):
+        score += NEXTDATA_DESCRIPTION_BONUS
+    return score
+
+
+def nextdata_item_to_article(
+    item: dict[str, Any], blog_url: str, blog_netloc: str
+) -> dict[str, str] | None:
+    """Convert one __NEXT_DATA__ post entry into a {url, title, date_str} article."""
+
+    def first_str(keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    title = first_str(NEXTDATA_TITLE_KEYS)
+    link = first_str(NEXTDATA_LINK_KEYS)
+    if not title or not link:
+        return None
+
+    full_url = (
+        link
+        if link.startswith("http")
+        else urljoin(blog_url.rstrip("/") + "/", link.lstrip("/"))
+    )
+    # Same host/scheme restriction as the anchor-based scrape: this JSON is
+    # remote, untrusted content and must not be able to steer us off-host.
+    parsed = urlparse(full_url)
+    if parsed.scheme not in ("http", "https") or parsed.netloc != blog_netloc:
+        return None
+
+    article = {
+        "url": full_url,
+        "title": title,
+        "date_str": first_str(NEXTDATA_DATE_KEYS),
+    }
+    description = first_str(NEXTDATA_DESCRIPTION_KEYS)
+    if description:
+        article["description"] = description
+    return article
+
+
+def scrape_index_nextdata(blog_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
+    """Fallback index scrape for blogs whose post list only exists as JSON in a __NEXT_DATA__ script tag."""
+    data = find_nextdata_json(soup)
+    if data is None:
+        return []
+
+    candidates = find_nextdata_post_lists(data)
+    if not candidates:
+        return []
+
+    best = max(candidates, key=score_nextdata_post_list)
+    blog_netloc = urlparse(blog_url).netloc
+
+    articles: dict[str, dict[str, str]] = {}
+    for item in best:
+        article = nextdata_item_to_article(item, blog_url, blog_netloc)
+        if article and article["url"] not in articles:
+            articles[article["url"]] = article
+    return list(articles.values())
+
+
+def scrape_index_anchors(
+    blog_url: str, soup: BeautifulSoup
+) -> dict[str, dict[str, str]]:
+    """Scrape article links directly out of the index page's <a> tags.
+
+    Returns {url: {url, title, date_str}}.
     """
     parsed = urlparse(blog_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
     blog_netloc = parsed.netloc
     blog_path = parsed.path.rstrip("/")
-
-    log.info("Fetching index: %s", blog_url)
-    try:
-        soup = fetch(blog_url)
-    except Exception as e:
-        log.error("Failed to fetch index %s: %s", blog_url, e)
-        return []
 
     articles: dict[str, dict[str, str]] = {}  # url -> info
 
@@ -395,11 +507,32 @@ def scrape_index(blog_url: str, max_items: int = 25) -> list[dict[str, str]]:
             "date_str": date_str,
         }
 
+    return articles
+
+
+def scrape_index(blog_url: str, max_items: int = 25) -> list[dict[str, str]]:
+    """Scrape the blog index page.
+
+    Returns list of {url, title, date_str} sorted newest-first.
+    """
+    log.info("Fetching index: %s", blog_url)
+    try:
+        soup = fetch(blog_url)
+    except Exception as e:
+        log.error("Failed to fetch index %s: %s", blog_url, e)
+        return []
+
+    article_list = list(scrape_index_anchors(blog_url, soup).values())
+    if not article_list:
+        article_list = scrape_index_nextdata(blog_url, soup)
+        if article_list:
+            log.info("No <a> links found; using embedded __NEXT_DATA__ post list")
+
     def sort_key(item: dict[str, str]) -> datetime:
         dt = parse_date(item["date_str"])
         return dt or datetime.min.replace(tzinfo=UTC)
 
-    sorted_articles = sorted(articles.values(), key=sort_key, reverse=True)
+    sorted_articles = sorted(article_list, key=sort_key, reverse=True)
     return sorted_articles[:max_items]
 
 

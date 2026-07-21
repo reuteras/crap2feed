@@ -10,6 +10,14 @@ article page (JSON-LD, Open Graph tags, or a best-effort fallback). The
 result is written out as a standard RSS 2.0 XML file that any feed reader
 can subscribe to.
 
+Some blogs render their post list purely client-side and have no `<a href>`
+markup for individual posts in the raw HTML at all (e.g. Next.js sites that
+embed the post list as JSON in a `__NEXT_DATA__` script tag). When the
+normal link-scrape finds nothing, crap2rss falls back to hunting through
+that embedded JSON for a list that looks like a set of blog posts, so these
+"different types of crap blogs" are supported too, not just the plain
+link-list ones.
+
 ## Requirements
 
 - Python 3.14+

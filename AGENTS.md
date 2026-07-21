@@ -77,6 +77,29 @@ deliberate choice, not a convenience:
   `.pre-commit-config.yaml` when bumping either one, so local runs,
   `uv run`, and the pre-commit hook stay consistent.
 
+## Two index-scraping strategies: anchors, then __NEXT_DATA__
+
+`scrape_index` tries `scrape_index_anchors` first (the original strategy:
+walk `<a href>` tags on the index page). If that finds nothing —
+e.g. security.apple.com/blog, a Next.js app whose post list is rendered
+entirely client-side from JSON, with no `<a href>` markup for posts
+anywhere in the raw HTML — it falls back to `scrape_index_nextdata`, which
+parses the `__NEXT_DATA__` script tag's JSON and recursively searches it
+(`find_nextdata_post_lists`) for a list of dicts that look like post
+entries (has a title-like key from `NEXTDATA_TITLE_KEYS` and a link-like
+key from `NEXTDATA_LINK_KEYS`), then picks the best-scoring candidate
+(`score_nextdata_post_list`, biased toward lists that also carry date/
+description keys — a site's JSON can embed more than one dict-list shape,
+e.g. related posts alongside the full index).
+
+This fallback is deliberately generic (keyed off the presence of
+`__NEXT_DATA__` + shape-matching, not any Apple-specific string) since
+other "crap blogs" use the same Next.js pattern. If you add a third
+strategy for some other rendering pattern, follow the same shape: a
+function returning `list[dict[str, str]]` with `{url, title, date_str}`
+(optionally `description`), tried only when the earlier strategies come up
+empty, not merged with them.
+
 ## Remote content is untrusted — security invariants in fetch()/scrape_index()
 
 crap2rss fetches attacker-reachable content (any blog in the config can
@@ -84,11 +107,14 @@ serve a compromised or hostile index page), and that content directly
 influences what other URLs get fetched next. Do not weaken any of these
 without understanding why they're there:
 
-- `scrape_index` only queues links whose scheme is `http`/`https` and whose
-  `netloc` matches the configured blog's host. Without this, a malicious
-  index page can plant a same-path link (`/blog/whatever`) pointing at a
-  completely different host — internal services, cloud metadata endpoints,
-  etc. — and crap2rss would fetch it as if it were an article.
+- `scrape_index_anchors` only queues links whose scheme is `http`/`https`
+  and whose `netloc` matches the configured blog's host. Without this, a
+  malicious index page can plant a same-path link (`/blog/whatever`)
+  pointing at a completely different host — internal services, cloud
+  metadata endpoints, etc. — and crap2rss would fetch it as if it were an
+  article. `scrape_index_nextdata`/`nextdata_item_to_article` apply the
+  same same-host/same-scheme check to URLs built from `__NEXT_DATA__`
+  JSON — that JSON is just as untrusted as the HTML it's embedded in.
 - `fetch()` calls `SESSION.get(..., allow_redirects=False)` and resolves
   redirects itself, checking the `Location` header's host **before**
   issuing the next request. This was originally written with

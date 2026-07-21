@@ -19,6 +19,18 @@ are in [README.md](README.md).
   `src/rwreader`, `READWISE_TOKEN`, and `tests/` — that's leftover from a
   different project template and does not apply here; don't treat it as a
   source of truth for how to test this repo.
+- CLI argument parsing lives in `build_parser()`, separate from `main()`,
+  purely to stay under ruff's `PLR0915` (too-many-statements) limit — `main()`
+  was already close to the ceiling before `--quiet`/`--copy` pushed it over.
+  If you add another flag, add it to `build_parser()`, not inline in
+  `main()`.
+- All logging goes to `stderr` (`logging.basicConfig(..., stream=sys.stderr)`
+  at import time) — `> /dev/null` alone never silences it. `--quiet` raises
+  the *root* logger to `WARNING` at the top of `main()`; `log =
+  logging.getLogger("crap2rss")` is a child logger with no level of its own,
+  so it inherits whatever the root is set to. Don't set the level on `log`
+  directly for this — that would only affect this one module's logger, not
+  any other loggers that might exist.
 
 ## Before committing changes to crap2rss.py
 

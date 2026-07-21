@@ -75,6 +75,12 @@ uv run crap2rss --init
 
 # Spoof a Firefox User-Agent instead of the default, honest one
 uv run crap2rss --agent firefox
+
+# Only log warnings/errors (quiet, cron-friendly)
+uv run crap2rss --quiet
+
+# Also copy generated feed files to a second directory (e.g. a web server dir)
+uv run crap2rss --copy /var/www/feeds
 ```
 
 Each run writes one `.xml` file per feed into `output_dir`, plus a
@@ -84,6 +90,18 @@ every run, and articles that fall off the index page are automatically
 dropped from it. Run crap2rss on a schedule (cron, systemd timer, etc.) and
 serve `output_dir` with any static file server to get feeds that stay up to
 date.
+
+All log output goes to stderr, so `> /dev/null` alone won't silence it; use
+`--quiet` to drop INFO-level messages and only log warnings/errors, which
+plays nicer with cron's default of mailing anything a job prints. If you
+keep your checkout separate from the directory your web server serves
+(e.g. `output_dir` is a working copy and a web server reads from
+`/var/www/feeds`), pass `--copy DIR` to also copy each generated `.xml`
+file there after it's written. A typical crontab entry:
+
+```cron
+*/30 * * * * cd /path/to/crap2rss && uv run crap2rss --quiet --copy /var/www/feeds
+```
 
 ## Being a good crawler
 

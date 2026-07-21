@@ -18,6 +18,8 @@ Usage:
   python3 crap2rss.py --feed "Pillar Security"  # one feed only
   python3 crap2rss.py --config /etc/crap2rss.yaml
   python3 crap2rss.py --list                 # list configured feeds
+  python3 crap2rss.py --quiet                # cron-friendly: warnings/errors only
+  python3 crap2rss.py --copy /var/www/feeds  # also copy output files there
 
 The generated files can be served by any static file server.
 """
@@ -27,6 +29,7 @@ import json
 import logging
 import mimetypes
 import re
+import shutil
 import sys
 import time
 from datetime import UTC, datetime
@@ -608,8 +611,8 @@ def save_cache(path: Path, cache: dict[str, dict[str, dict[str, str]]]) -> None:
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
-    """CLI entry point: parse args and generate configured feeds."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Generate RSS feeds for blogs that don't have one.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -639,7 +642,25 @@ def main() -> None:
             "site operators can allowlist it) or 'firefox' (spoof a browser)"
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Only log warnings and errors (suppress INFO messages, e.g. for cron)",
+    )
+    parser.add_argument(
+        "--copy",
+        metavar="DIR",
+        help="Also copy each generated feed file to this directory (e.g. a web server dir)",
+    )
+    return parser
+
+
+def main() -> None:
+    """CLI entry point: parse args and generate configured feeds."""
+    args = build_parser().parse_args()
+
+    if args.quiet:
+        logging.getLogger().setLevel(logging.WARNING)
 
     if args.agent == "firefox":
         SESSION.headers["User-Agent"] = FIREFOX_USER_AGENT
@@ -684,6 +705,9 @@ def main() -> None:
 
     # Generate all (or filtered) feeds to disk
     output_dir.mkdir(parents=True, exist_ok=True)
+    copy_dir = Path(args.copy) if args.copy else None
+    if copy_dir:
+        copy_dir.mkdir(parents=True, exist_ok=True)
     cache_path = output_dir / CACHE_FILENAME
     cache = load_cache(cache_path)
     for feed_cfg in feeds:
@@ -698,6 +722,10 @@ def main() -> None:
         xml = generate_feed(feed_cfg, cache, max_items=max_items)
         out_path.write_text(xml, encoding="utf-8")
         log.info("Written: %s", out_path)
+        if copy_dir:
+            dest_path = copy_dir / out_name
+            shutil.copy2(out_path, dest_path)
+            log.info("Copied to: %s", dest_path)
     save_cache(cache_path, cache)
 
 

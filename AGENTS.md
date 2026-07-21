@@ -77,7 +77,7 @@ deliberate choice, not a convenience:
   `.pre-commit-config.yaml` when bumping either one, so local runs,
   `uv run`, and the pre-commit hook stay consistent.
 
-## Two index-scraping strategies: anchors, then __NEXT_DATA__
+## Two index-scraping strategies: anchors, then `__NEXT_DATA__`
 
 `scrape_index` tries `scrape_index_anchors` first (the original strategy:
 walk `<a href>` tags on the index page). If that finds nothing —
@@ -116,7 +116,7 @@ without understanding why they're there:
   same same-host/same-scheme check to URLs built from `__NEXT_DATA__`
   JSON — that JSON is just as untrusted as the HTML it's embedded in.
 - `fetch()` calls `SESSION.get(..., allow_redirects=False)` and resolves
-  redirects itself, checking the `Location` header's host **before**
+  redirects itself, checking the `Location` header's host __before__
   issuing the next request. This was originally written with
   `allow_redirects=True` plus a check on `r.url` *after* the call returned
   — that looks equivalent but isn't: `requests` had already completed the

@@ -20,6 +20,7 @@ Usage:
   python3 crap2rss.py --list                 # list configured feeds
   python3 crap2rss.py --quiet                # cron-friendly: warnings/errors only
   python3 crap2rss.py --copy /var/www/feeds  # also copy output files there
+  python3 crap2rss.py --check https://example.com/blog  # test a URL, no config needed
 
 The generated files can be served by any static file server.
 """
@@ -743,6 +744,45 @@ def save_cache(path: Path, cache: dict[str, dict[str, dict[str, str]]]) -> None:
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+CHECK_PREVIEW_ITEMS = 5
+CHECK_DESCRIPTION_PREVIEW_LENGTH = 150
+
+
+def check_url(url: str) -> None:
+    """Diagnostic: scrape `url` as a blog index and report what crap2rss finds.
+
+    Standalone command — no config file or output directory needed. Nothing
+    is written to disk; this only prints what generate_feed() would produce.
+    """
+    articles = scrape_index(url, max_items=CHECK_PREVIEW_ITEMS)
+    if not articles:
+        log.error("No articles found at %s", url)
+        log.error(
+            "crap2rss could not find any post links (or a __NEXT_DATA__ post "
+            "list) on this page."
+        )
+        sys.exit(1)
+
+    print(f"\nFound {len(articles)} article(s) (showing up to {CHECK_PREVIEW_ITEMS}):\n")
+    for i, a in enumerate(articles, 1):
+        print(f"{i}. {a.get('title') or '(no title from index page)'}")
+        print(f"   {a['url']}")
+        if a.get("date_str"):
+            print(f"   date (from index): {a['date_str']}")
+
+    print("\nFetching the first article to check metadata extraction...")
+    meta = get_article_metadata(articles[0]["url"])
+    if not meta.get("title") and not meta.get("description"):
+        log.warning("Could not extract title/description from the article page.")
+    else:
+        desc = meta.get("description") or "(none)"
+        print(f"  title:       {meta.get('title') or '(none)'}")
+        print(f"  description: {desc[:CHECK_DESCRIPTION_PREVIEW_LENGTH]}")
+        print(f"  date:        {meta.get('date') or '(none — feed will use current time)'}")
+        print(f"  image:       {meta.get('image') or '(none)'}")
+
+    print("\ncrap2rss can generate a feed for this URL.")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
@@ -765,6 +805,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--init", action="store_true", help="Write example config and exit"
+    )
+    parser.add_argument(
+        "--check",
+        metavar="URL",
+        help=(
+            "Test whether crap2rss can find and parse articles at URL, then "
+            "exit. No config file or output directory needed."
+        ),
     )
     parser.add_argument(
         "--agent",
@@ -797,6 +845,10 @@ def main() -> None:
 
     if args.agent == "firefox":
         SESSION.headers["User-Agent"] = FIREFOX_USER_AGENT
+
+    if args.check:
+        check_url(args.check)
+        return
 
     config_path = Path(args.config)
 

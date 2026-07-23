@@ -81,6 +81,9 @@ uv run crap2rss --list
 # Write the example config and exit
 uv run crap2rss --init
 
+# Check whether crap2rss can find articles at a URL, no config needed
+uv run crap2rss --check https://example.com/blog
+
 # Spoof a Firefox User-Agent instead of the default, honest one
 uv run crap2rss --agent firefox
 

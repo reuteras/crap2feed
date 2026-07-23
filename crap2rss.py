@@ -136,6 +136,33 @@ def to_rfc822(dt: datetime | None) -> str:
     return formatdate(dt.timestamp(), usegmt=True)
 
 
+# Matches dates in various formats found near article links or headings
+DATE_RE = re.compile(
+    r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:[Z+-]\S*)?"
+    r"|\d{4}-\d{2}-\d{2}"
+    r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+    r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+\d{1,2},?\s+\d{4}"
+    r"|\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
+    r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+\d{4})\b"
+)
+
+
+def find_date_near(tag: Tag, radius: int = 5) -> str:
+    """Walk up/sideways in the DOM looking for a date string."""
+    node: Tag | None = tag
+    for _ in range(radius):
+        if node is None:
+            break
+        text = node.get_text(" ", strip=True)
+        m = DATE_RE.search(text)
+        if m:
+            return m.group(0)
+        node = node.parent
+    return ""
+
+
 # ── Fetching ───────────────────────────────────────────────────────────────────
 
 
@@ -286,6 +313,13 @@ def get_article_metadata(url: str) -> dict[str, str]:
         raw_image = raw_image.get("url", "")
     image = str(raw_image)
     date_raw = jsonld.get("datePublished") or og.get("date") or ""
+    if not date_raw:
+        # Some sites (e.g. Webflow-built blogs) render the published date as
+        # plain text near the headline with no JSON-LD or OG date metadata
+        # at all. Fall back to hunting for a date string near the <h1>.
+        heading = soup.find("h1")
+        if heading is not None:
+            date_raw = find_date_near(heading)
 
     return {
         "title": (title or "").strip(),
@@ -296,32 +330,6 @@ def get_article_metadata(url: str) -> dict[str, str]:
 
 
 # ── Index scraping ─────────────────────────────────────────────────────────────
-
-# Matches dates in various formats found near article links
-DATE_RE = re.compile(
-    r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:[Z+-]\S*)?"
-    r"|\d{4}-\d{2}-\d{2}"
-    r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
-    r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    r"\s+\d{1,2},?\s+\d{4}"
-    r"|\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
-    r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    r"\s+\d{4})\b"
-)
-
-
-def find_date_near(tag: Tag, radius: int = 5) -> str:
-    """Walk up/sideways in the DOM looking for a date string."""
-    node: Tag | None = tag
-    for _ in range(radius):
-        if node is None:
-            break
-        text = node.get_text(" ", strip=True)
-        m = DATE_RE.search(text)
-        if m:
-            return m.group(0)
-        node = node.parent
-    return ""
 
 
 MIN_SLUG_LENGTH = 5
@@ -763,7 +771,9 @@ def check_url(url: str) -> None:
         )
         sys.exit(1)
 
-    print(f"\nFound {len(articles)} article(s) (showing up to {CHECK_PREVIEW_ITEMS}):\n")
+    print(
+        f"\nFound {len(articles)} article(s) (showing up to {CHECK_PREVIEW_ITEMS}):\n"
+    )
     for i, a in enumerate(articles, 1):
         print(f"{i}. {a.get('title') or '(no title from index page)'}")
         print(f"   {a['url']}")
@@ -778,7 +788,9 @@ def check_url(url: str) -> None:
         desc = meta.get("description") or "(none)"
         print(f"  title:       {meta.get('title') or '(none)'}")
         print(f"  description: {desc[:CHECK_DESCRIPTION_PREVIEW_LENGTH]}")
-        print(f"  date:        {meta.get('date') or '(none — feed will use current time)'}")
+        print(
+            f"  date:        {meta.get('date') or '(none — feed will use current time)'}"
+        )
         print(f"  image:       {meta.get('image') or '(none)'}")
 
     print("\ncrap2rss can generate a feed for this URL.")

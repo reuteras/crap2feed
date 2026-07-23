@@ -6,14 +6,6 @@ settings:
   output_dir: ./feeds    # where to write .xml files
 
 feeds:
-  - name: Pillar Security Blog
-    url: https://www.pillar.security/blog
-    output: pillar.xml
-
-  - name: Sekoia Blog
-    url: https://www.sekoia.com/blog
-    output: sekoia.xml
-
   - name: AAIF Blog
     url: https://aaif.io/blog
     output: aaif.xml
@@ -22,10 +14,22 @@ feeds:
     url: https://security.apple.com/blog
     output: apple.xml
 
+  - name: BC Security
+    url: https://bcsecurity.io/blog/
+    output: bcsecurity.xml
+
   - name: Crowdstrike
     url: https://www.crowdstrike.com/en-us/blog/
     output: clownstrike.xml
 
-  - name: BC Security
-    url: https://bcsecurity.io/blog/
-    output: bcsecurity.xml
+  - name: Intezer
+    url: https://intezer.com/blog
+    output: intezer.xml
+
+  - name: Pillar Security Blog
+    url: https://www.pillar.security/blog
+    output: pillar.xml
+
+  - name: Sekoia Blog
+    url: https://www.sekoia.com/blog
+    output: sekoia.xml

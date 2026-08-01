@@ -1,13 +1,13 @@
 # crap2rss
 
-Since many companies and organisations don't think that RSS is needed for
-blogs, this tool scrapes their blog index pages and generates RSS feeds for
-them anyway.
+Since many companies and organisations don't think that RSS/Atom is needed
+for blogs, this tool scrapes their blog index pages and generates Atom
+feeds for them anyway.
 
 It works by fetching a blog's index page, finding links that look like
 articles, and pulling title/description/image/date metadata out of each
 article page (JSON-LD, Open Graph tags, or a best-effort fallback). The
-result is written out as a standard RSS 2.0 XML file that any feed reader
+result is written out as a standard Atom 1.0 XML file that any feed reader
 can subscribe to.
 
 Some blogs render their post list purely client-side and have no `<a href>`

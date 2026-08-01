@@ -1,5 +1,5 @@
-# crap2rss configuration
-# Run: python3 crap2rss.py
+# crap2feed configuration
+# Run: python3 crap2feed.py
 
 settings:
   max_items: 20          # articles per feed

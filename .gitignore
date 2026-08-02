@@ -11,5 +11,5 @@ wheels/
 __pycache__
 
 # Project files
-crap2rss.yaml
+crap2feed.yaml
 feeds

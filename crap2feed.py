@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""crap2rss — generic RSS/Atom feed generator for blogs that lack feeds.
+"""crap2feed — generic Atom feed generator for blogs that lack feeds.
 
-Config file: crap2rss.yaml (or pass --config path/to/file)
+Config file: crap2feed.yaml (or pass --config path/to/file)
 
 Example config:
   feeds:
@@ -14,13 +14,13 @@ Example config:
       output: sekoia.xml
 
 Usage:
-  python3 crap2rss.py                        # generate all feeds from config
-  python3 crap2rss.py --feed "Pillar Security"  # one feed only
-  python3 crap2rss.py --config /etc/crap2rss.yaml
-  python3 crap2rss.py --list                 # list configured feeds
-  python3 crap2rss.py --quiet                # cron-friendly: warnings/errors only
-  python3 crap2rss.py --copy /var/www/feeds  # also copy output files there
-  python3 crap2rss.py --check https://example.com/blog  # test a URL, no config needed
+  python3 crap2feed.py                        # generate all feeds from config
+  python3 crap2feed.py --feed "Pillar Security"  # one feed only
+  python3 crap2feed.py --config /etc/crap2feed.yaml
+  python3 crap2feed.py --list                 # list configured feeds
+  python3 crap2feed.py --quiet                # cron-friendly: warnings/errors only
+  python3 crap2feed.py --copy /var/www/feeds  # also copy output files there
+  python3 crap2feed.py --check https://example.com/blog  # test a URL, no config needed
 
 The generated files can be served by any static file server.
 """
@@ -34,7 +34,6 @@ import shutil
 import sys
 import time
 from datetime import UTC, datetime
-from email.utils import formatdate
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
 from pathlib import Path
@@ -58,15 +57,15 @@ logging.basicConfig(
     level=logging.INFO,
     stream=sys.stderr,
 )
-log = logging.getLogger("crap2rss")
+log = logging.getLogger("crap2feed")
 
 # ── HTTP config ────────────────────────────────────────────────────────────────
 
 
 def _package_version() -> str:
-    """Return the installed crap2rss version, or a dev fallback."""
+    """Return the installed crap2feed version, or a dev fallback."""
     try:
-        return installed_version("crap2rss")
+        return installed_version("crap2feed")
     except PackageNotFoundError:
         return "0.0.0-dev"
 
@@ -75,7 +74,7 @@ def _package_version() -> str:
 # site operators can allowlist/rate-limit it instead of lumping it in with
 # generic browser traffic. --agent firefox opts into spoofing a browser UA.
 HONEST_USER_AGENT = (
-    f"crap2rss/{_package_version()} (+https://github.com/reuteras/crap2rss)"
+    f"crap2feed/{_package_version()} (+https://github.com/reuteras/crap2feed)"
 )
 FIREFOX_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
@@ -129,11 +128,11 @@ def parse_date(s: str) -> datetime | None:
     return None
 
 
-def to_rfc822(dt: datetime | None) -> str:
-    """Format a datetime as an RFC 822 string, defaulting to now."""
+def to_rfc3339(dt: datetime | None) -> str:
+    """Format a datetime as an RFC 3339 string (Atom's date format), defaulting to now."""
     if dt is None:
-        return formatdate(usegmt=True)
-    return formatdate(dt.timestamp(), usegmt=True)
+        dt = datetime.now(UTC)
+    return dt.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # Matches dates in various formats found near article links or headings
@@ -567,18 +566,18 @@ def xml_escape(s: str) -> str:
     )
 
 
-def build_rss(feed_name: str, blog_url: str, articles: list[dict[str, str]]) -> str:
-    """Render a list of articles as an RSS 2.0 XML document."""
-    now = formatdate(usegmt=True)
+def build_atom(feed_name: str, blog_url: str, articles: list[dict[str, str]]) -> str:
+    """Render a list of articles as an Atom 1.0 XML document."""
+    now = to_rfc3339(None)
 
-    items: list[str] = []
+    entries: list[str] = []
     for a in articles:
         title = xml_escape(a.get("title") or "Untitled")
         url = xml_escape(a["url"])
         desc = xml_escape(a.get("description") or title)
         img = a.get("image", "")
         dt = parse_date(a.get("date") or a.get("date_str") or "")
-        pub = to_rfc822(dt)
+        updated = to_rfc3339(dt)
 
         img_html = (
             f'&lt;img src="{xml_escape(img)}" style="max-width:100%;margin-bottom:1em"/&gt;&lt;br/&gt;'
@@ -588,34 +587,34 @@ def build_rss(feed_name: str, blog_url: str, articles: list[dict[str, str]]) -> 
         enclosure = ""
         if img:
             mime = mimetypes.guess_type(img)[0] or "image/jpeg"
-            enclosure = (
-                f'\n      <enclosure url="{xml_escape(img)}" type="{mime}" length="0"/>'
-            )
+            enclosure = f'\n      <link rel="enclosure" href="{xml_escape(img)}" type="{mime}"/>'
 
-        items.append(f"""    <item>
-      <title>{title}</title>
-      <link>{url}</link>
-      <guid isPermaLink="true">{url}</guid>
-      <pubDate>{pub}</pubDate>{enclosure}
-      <description>{img_html}{desc}</description>
-    </item>""")
+        entries.append(f"""  <entry>
+    <title>{title}</title>
+    <link href="{url}"/>
+    <id>{url}</id>
+    <updated>{updated}</updated>
+    <published>{updated}</published>{enclosure}
+    <content type="html">{img_html}{desc}</content>
+  </entry>""")
 
-    items_xml = "\n".join(items)
+    entries_xml = "\n".join(entries)
     feed_name_esc = xml_escape(feed_name)
     blog_url_esc = xml_escape(blog_url)
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <channel>
-    <title>{feed_name_esc}</title>
-    <link>{blog_url_esc}</link>
-    <description>RSS feed for {feed_name_esc} generated by crap2rss</description>
-    <language>en</language>
-    <lastBuildDate>{now}</lastBuildDate>
-    <atom:link href="{blog_url_esc}" rel="self" type="application/rss+xml"/>
-{items_xml}
-  </channel>
-</rss>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>{feed_name_esc}</title>
+  <subtitle>Atom feed for {feed_name_esc} generated by crap2feed</subtitle>
+  <link href="{blog_url_esc}" rel="alternate"/>
+  <link href="{blog_url_esc}" rel="self"/>
+  <id>{blog_url_esc}</id>
+  <updated>{now}</updated>
+  <author>
+    <name>{feed_name_esc}</name>
+  </author>
+{entries_xml}
+</feed>
 """
 
 
@@ -627,7 +626,7 @@ def generate_feed(
     cache: dict[str, dict[str, dict[str, str]]],
     max_items: int = 20,
 ) -> str:
-    """Generate RSS XML for one feed config entry.
+    """Generate Atom XML for one feed config entry.
 
     `cache` maps feed name -> {article url -> metadata}. Articles already
     present in the cache are reused as-is instead of being re-fetched, so
@@ -641,7 +640,7 @@ def generate_feed(
     articles = scrape_index(url, max_items=max_items)
     if not articles:
         log.warning("[%s] No articles found on index page.", name)
-        return build_rss(name, url, [])
+        return build_atom(name, url, [])
 
     new_count = sum(1 for a in articles if a["url"] not in feed_cache)
     log.info(
@@ -684,16 +683,16 @@ def generate_feed(
         if stale_url not in current_urls:
             del feed_cache[stale_url]
 
-    return build_rss(name, url, articles)
+    return build_atom(name, url, articles)
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = Path("crap2rss.yaml")
+DEFAULT_CONFIG = Path("crap2feed.yaml")
 
 EXAMPLE_CONFIG = """\
-# crap2rss configuration
-# Run: python3 crap2rss.py
+# crap2feed configuration
+# Run: python3 crap2feed.py
 
 settings:
   max_items: 20          # articles per feed
@@ -728,7 +727,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
 # ── Metadata cache ─────────────────────────────────────────────────────────────
 
-CACHE_FILENAME = ".crap2rss_cache.json"
+CACHE_FILENAME = ".crap2feed_cache.json"
 
 
 def load_cache(path: Path) -> dict[str, dict[str, dict[str, str]]]:
@@ -757,7 +756,7 @@ CHECK_DESCRIPTION_PREVIEW_LENGTH = 150
 
 
 def check_url(url: str) -> None:
-    """Diagnostic: scrape `url` as a blog index and report what crap2rss finds.
+    """Diagnostic: scrape `url` as a blog index and report what crap2feed finds.
 
     Standalone command — no config file or output directory needed. Nothing
     is written to disk; this only prints what generate_feed() would produce.
@@ -766,7 +765,7 @@ def check_url(url: str) -> None:
     if not articles:
         log.error("No articles found at %s", url)
         log.error(
-            "crap2rss could not find any post links (or a __NEXT_DATA__ post "
+            "crap2feed could not find any post links (or a __NEXT_DATA__ post "
             "list) on this page."
         )
         sys.exit(1)
@@ -793,13 +792,13 @@ def check_url(url: str) -> None:
         )
         print(f"  image:       {meta.get('image') or '(none)'}")
 
-    print("\ncrap2rss can generate a feed for this URL.")
+    print("\ncrap2feed can generate a feed for this URL.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description="Generate RSS feeds for blogs that don't have one.",
+        description="Generate Atom feeds for blogs that don't have one.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -807,7 +806,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=str(DEFAULT_CONFIG),
         metavar="FILE",
-        help="Config file (default: crap2rss.yaml)",
+        help="Config file (default: crap2feed.yaml)",
     )
     parser.add_argument(
         "--feed", metavar="NAME", help="Only generate this feed (partial name match)"
@@ -822,7 +821,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--check",
         metavar="URL",
         help=(
-            "Test whether crap2rss can find and parse articles at URL, then "
+            "Test whether crap2feed can find and parse articles at URL, then "
             "exit. No config file or output directory needed."
         ),
     )
@@ -831,7 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["honest", "firefox"],
         default="honest",
         help=(
-            "User-Agent to send: 'honest' (default, identifies crap2rss so "
+            "User-Agent to send: 'honest' (default, identifies crap2feed so "
             "site operators can allowlist it) or 'firefox' (spoof a browser)"
         ),
     )

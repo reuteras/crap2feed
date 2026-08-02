@@ -5,14 +5,14 @@ are in [README.md](README.md).
 
 ## Project shape
 
-- `crap2rss.py` is the entire application: a single flat module (not a
+- `crap2feed.py` is the entire application: a single flat module (not a
   package). CLI entry point is `main()`, wired up via
-  `[project.scripts] crap2rss = "crap2rss:main"` and
-  `[tool.setuptools] py-modules = ["crap2rss"]` in `pyproject.toml`. Don't
-  turn this into a package (`crap2rss/__init__.py` etc.) without updating
+  `[project.scripts] crap2feed = "crap2feed:main"` and
+  `[tool.setuptools] py-modules = ["crap2feed"]` in `pyproject.toml`. Don't
+  turn this into a package (`crap2feed/__init__.py` etc.) without updating
   both of those.
-- `crap2rss.yaml` (user config) and `feeds/` (generated output +
-  `.crap2rss_cache.json`) are gitignored and only exist locally/at runtime.
+- `crap2feed.yaml` (user config) and `feeds/` (generated output +
+  `.crap2feed_cache.json`) are gitignored and only exist locally/at runtime.
   Don't assume they exist; `load_config` creates an example config if
   missing.
 - No test suite exists yet. `.github/workflows/tests.yml` references
@@ -27,19 +27,19 @@ are in [README.md](README.md).
 - All logging goes to `stderr` (`logging.basicConfig(..., stream=sys.stderr)`
   at import time) — `> /dev/null` alone never silences it. `--quiet` raises
   the *root* logger to `WARNING` at the top of `main()`; `log =
-  logging.getLogger("crap2rss")` is a child logger with no level of its own,
+  logging.getLogger("crap2feed")` is a child logger with no level of its own,
   so it inherits whatever the root is set to. Don't set the level on `log`
   directly for this — that would only affect this one module's logger, not
   any other loggers that might exist.
 
-## Before committing changes to crap2rss.py
+## Before committing changes to crap2feed.py
 
 Run all three; the project's mypy/ruff config is strict on purpose:
 
 ```sh
 uv run ruff check .
 uv run ruff format .
-uv run mypy crap2rss.py
+uv run mypy crap2feed.py
 ```
 
 - Every function must have full type annotations (`disallow_untyped_defs`,
@@ -67,7 +67,7 @@ deliberate choice, not a convenience:
   floors in `pyproject.toml`; `uv.lock` is the actual pin and must stay
   committed and in sync (`uv sync --dev` after any manifest change).
   `urllib3` is declared directly (not left as an implicit transitive dep
-  of `requests`) because `crap2rss.py` imports `urllib3.util.retry.Retry`
+  of `requests`) because `crap2feed.py` imports `urllib3.util.retry.Retry`
   directly, for the retry/backoff adapter — don't rely on a package you
   import only being present transitively.
 - Don't add `types-*` stub packages, testing frameworks, or other tooling
@@ -102,7 +102,7 @@ empty, not merged with them.
 
 ## Remote content is untrusted — security invariants in fetch()/scrape_index()
 
-crap2rss fetches attacker-reachable content (any blog in the config can
+crap2feed fetches attacker-reachable content (any blog in the config can
 serve a compromised or hostile index page), and that content directly
 influences what other URLs get fetched next. Do not weaken any of these
 without understanding why they're there:
@@ -111,7 +111,7 @@ without understanding why they're there:
   and whose `netloc` matches the configured blog's host. Without this, a
   malicious index page can plant a same-path link (`/blog/whatever`)
   pointing at a completely different host — internal services, cloud
-  metadata endpoints, etc. — and crap2rss would fetch it as if it were an
+  metadata endpoints, etc. — and crap2feed would fetch it as if it were an
   article. `scrape_index_nextdata`/`nextdata_item_to_article` apply the
   same same-host/same-scheme check to URLs built from `__NEXT_DATA__`
   JSON — that JSON is just as untrusted as the HTML it's embedded in.
@@ -133,7 +133,7 @@ without understanding why they're there:
 - `xml_escape()` strips XML-illegal control characters before entity-
   escaping, since remote titles/descriptions can contain anything.
 - The default `User-Agent` (`HONEST_USER_AGENT`) is built from the
-  installed package version via `importlib.metadata.version("crap2rss")`,
+  installed package version via `importlib.metadata.version("crap2feed")`,
   not a hardcoded string — don't duplicate the version number from
   `pyproject.toml` here. `--agent firefox` swaps in `FIREFOX_USER_AGENT`
   for sites that block non-browser UAs.
@@ -151,9 +151,9 @@ without understanding why they're there:
   `[build-system]`, or setuptools will either drop them silently or (once
   `[tool.setuptools]` exists) fail the build outright with an "unknown
   key" error.
-- `console_scripts` pointing at `crap2rss.main:main` will fail at runtime
-  with `ModuleNotFoundError` — there is no `crap2rss` package or `main`
-  submodule, just `crap2rss.py`. The correct target is `crap2rss:main`.
+- `console_scripts` pointing at `crap2feed.main:main` will fail at runtime
+  with `ModuleNotFoundError` — there is no `crap2feed` package or `main`
+  submodule, just `crap2feed.py`. The correct target is `crap2feed:main`.
 - Verify packaging changes with `uv build` and inspecting the resulting
   wheel (`unzip -l dist/*.whl`), not just `uv sync` — `uv sync` uses an
   editable install and won't catch entry-point or `py-modules` mistakes

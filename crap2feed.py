@@ -21,8 +21,10 @@ Usage:
   python3 crap2feed.py --quiet                # cron-friendly: warnings/errors only
   python3 crap2feed.py --copy /var/www/feeds  # also copy output files there
   python3 crap2feed.py --check https://example.com/blog  # test a URL, no config needed
+  python3 crap2feed.py --serve                # serve feeds on demand over HTTP
 
-The generated files can be served by any static file server.
+The generated files can be served by any static file server, or crap2feed
+can serve them itself on demand with --serve.
 """
 
 import argparse
@@ -32,8 +34,11 @@ import mimetypes
 import re
 import shutil
 import sys
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
 from pathlib import Path
@@ -93,6 +98,35 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # abort fetching an implausibly large pag
 RETRY_TOTAL = 3
 RETRY_BACKOFF_FACTOR = 1.0
 RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
+
+# ── FlareSolverr fallback ──────────────────────────────────────────────────────
+#
+# Some sites 403 plain HTTP clients (Cloudflare/bot-protection challenges).
+# When settings.flaresolverr_url is configured, a 403 triggers a retry of
+# that same URL through FlareSolverr's headless-browser API instead of
+# giving up. .hosts remembers which hosts needed it this run, so later
+# requests to the same host skip straight to FlareSolverr instead of
+# spending a request on a 403 we already expect.
+
+
+@dataclass
+class FlareSolverrState:
+    """Mutable FlareSolverr config, set once from settings in main()/check_url().
+
+    A plain module-level `FLARESOLVERR_URL: str | None` would need a
+    `global` statement (and ruff's PLW0603) to update from main() — bundling
+    it in an object lets main() mutate an attribute instead of rebinding a
+    module-level name.
+    """
+
+    url: str | None = None
+    hosts: set[str] = field(default_factory=set)
+
+
+FLARESOLVERR = FlareSolverrState()
+FLARESOLVERR_TIMEOUT_MS = 60_000
+FLARESOLVERR_REQUEST_TIMEOUT = 65  # a little above maxTimeout, for our own HTTP call
+HTTP_FORBIDDEN = 403
 
 
 # ── Date parsing ───────────────────────────────────────────────────────────────
@@ -189,8 +223,8 @@ SESSION = build_session()
 MAX_REDIRECTS = 5
 
 
-def fetch(url: str) -> BeautifulSoup:
-    """Fetch a URL and parse it into a BeautifulSoup document.
+def _fetch_direct(url: str) -> BeautifulSoup:
+    """Fetch a URL directly and parse it into a BeautifulSoup document.
 
     The URL is remote, untrusted content: redirects are resolved by hand
     (allow_redirects=False) so each hop's host can be checked *before* it is
@@ -228,6 +262,60 @@ def fetch(url: str) -> BeautifulSoup:
         return BeautifulSoup(bytes(content), "html.parser")
 
     raise ValueError(f"too many redirects fetching {url}")
+
+
+def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
+    """Fetch a URL through FlareSolverr's headless-browser API.
+
+    Unlike _fetch_direct(), FlareSolverr follows any redirects itself inside
+    its own browser session — crap2feed never sees the intermediate hops, so
+    the same-host redirect guard in _fetch_direct() doesn't apply here.
+    Enabling FlareSolverr means trusting its own network egress for the
+    hosts routed through it.
+    """
+    payload: dict[str, Any] = {
+        "cmd": "request.get",
+        "url": url,
+        "maxTimeout": FLARESOLVERR_TIMEOUT_MS,
+    }
+    r = requests.post(
+        cast(str, FLARESOLVERR.url), json=payload, timeout=FLARESOLVERR_REQUEST_TIMEOUT
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "ok":
+        raise ValueError(f"FlareSolverr could not fetch {url}: {data.get('message')}")
+    html = data.get("solution", {}).get("response", "")
+    if len(html.encode("utf-8")) > MAX_RESPONSE_BYTES:
+        raise ValueError(f"response for {url} exceeded {MAX_RESPONSE_BYTES} bytes")
+    return BeautifulSoup(html, "html.parser")
+
+
+def fetch(url: str) -> BeautifulSoup:
+    """Fetch a URL, transparently retrying through FlareSolverr on a 403.
+
+    Direct fetches are tried first. If FlareSolverr is configured
+    (FLARESOLVERR.url set) and the host has already been seen to need it
+    this run, we skip straight to FlareSolverr; otherwise a 403 from a
+    direct fetch triggers one retry through FlareSolverr and remembers the
+    host for subsequent requests.
+    """
+    netloc = urlparse(url).netloc
+    if FLARESOLVERR.url and netloc in FLARESOLVERR.hosts:
+        return fetch_via_flaresolverr(url)
+
+    try:
+        return _fetch_direct(url)
+    except requests.HTTPError as e:
+        if (
+            FLARESOLVERR.url
+            and e.response is not None
+            and e.response.status_code == HTTP_FORBIDDEN
+        ):
+            log.info("403 from %s; retrying via FlareSolverr", netloc)
+            FLARESOLVERR.hosts.add(netloc)
+            return fetch_via_flaresolverr(url)
+        raise
 
 
 # ── Article metadata extraction ────────────────────────────────────────────────
@@ -749,10 +837,135 @@ def save_cache(path: Path, cache: dict[str, dict[str, dict[str, str]]]) -> None:
         log.warning("Could not write cache file %s: %s", path, e)
 
 
+# ── HTTP serving ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ServeConfig:
+    """Settings for --serve, bundled to keep FeedServer/serve()'s signatures short."""
+
+    output_dir: Path
+    cache_path: Path
+    max_items: int
+    ttl: int
+    host: str
+    port: int
+
+
+class FeedServer(ThreadingHTTPServer):
+    """HTTP server that generates feeds on demand, reusing a TTL'd copy on disk.
+
+    feed_locks holds one lock per feed, pre-populated at construction time
+    (rather than created lazily on first request) so concurrent requests for
+    a never-before-seen feed can't race to create two different locks for
+    it. cache_lock guards only the shared on-disk metadata cache file
+    (save_cache); it deliberately does *not* wrap feed generation itself, so
+    two different feeds can be regenerated concurrently instead of
+    serializing on one global lock.
+    """
+
+    def __init__(
+        self,
+        feeds: list[dict[str, str]],
+        config: ServeConfig,
+        handler_class: type[BaseHTTPRequestHandler],
+    ) -> None:
+        """Set up per-feed state and start listening."""
+        super().__init__((config.host, config.port), handler_class)
+        self.feeds_by_output: dict[str, dict[str, str]] = {
+            f["output"]: f for f in feeds
+        }
+        self.output_dir = config.output_dir
+        self.cache_path = config.cache_path
+        self.cache = load_cache(config.cache_path)
+        self.max_items = config.max_items
+        self.ttl = config.ttl
+        self.cache_lock = threading.Lock()
+        self.feed_locks: dict[str, threading.Lock] = {
+            output: threading.Lock() for output in self.feeds_by_output
+        }
+
+    def get_feed_xml(self, feed_cfg: dict[str, str]) -> str:
+        """Return this feed's XML, regenerating it only if older than the TTL."""
+        out_name = feed_cfg["output"]
+        out_path = self.output_dir / out_name
+        with self.feed_locks[out_name]:
+            if out_path.exists():
+                age = time.time() - out_path.stat().st_mtime
+                if age < self.ttl:
+                    return out_path.read_text(encoding="utf-8")
+
+            log.info("=== %s ===", feed_cfg["name"])
+            xml = generate_feed(feed_cfg, self.cache, max_items=self.max_items)
+            out_path.write_text(xml, encoding="utf-8")
+            with self.cache_lock:
+                save_cache(self.cache_path, self.cache)
+            return xml
+
+
+class FeedHandler(BaseHTTPRequestHandler):
+    """Serves configured feeds by exact output filename; nothing else."""
+
+    server: FeedServer
+
+    def do_GET(self) -> None:
+        """Serve a feed's XML, 404ing for anything not in the configured feed list."""
+        name = self.path.lstrip("/")
+        feed_cfg = self.server.feeds_by_output.get(name)
+        if feed_cfg is None:
+            self.send_error(404, "Unknown feed")
+            return
+        try:
+            xml = self.server.get_feed_xml(feed_cfg)
+        except Exception:
+            log.exception("Failed to generate feed for %s", self.path)
+            self.send_error(500, "Feed generation failed")
+            return
+        body = xml.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/atom+xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, log_format: str, *args: Any) -> None:
+        """Route request logging through the module logger instead of stderr."""
+        log.info("%s - %s", self.address_string(), log_format % args)
+
+
+def serve(feeds: list[dict[str, str]], config: ServeConfig) -> None:
+    """Run the on-demand HTTP feed server until interrupted."""
+    server = FeedServer(feeds, config, FeedHandler)
+    log.info(
+        "Serving %d feed(s) on http://%s:%d (ttl=%ds)",
+        len(feeds),
+        config.host,
+        config.port,
+        config.ttl,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 CHECK_PREVIEW_ITEMS = 5
 CHECK_DESCRIPTION_PREVIEW_LENGTH = 150
+DEFAULT_SERVE_HOST = "0.0.0.0"
+DEFAULT_SERVE_PORT = 8002
+DEFAULT_SERVE_TTL = 900
+
+
+def output_filename(feed_cfg: dict[str, str]) -> str:
+    """Return a feed's configured output filename, deriving one from its name if unset."""
+    name = feed_cfg["name"]
+    return feed_cfg.get(
+        "output", re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") + ".xml"
+    )
 
 
 def check_url(url: str) -> None:
@@ -844,7 +1057,38 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="Also copy each generated feed file to this directory (e.g. a web server dir)",
     )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Serve feeds on demand over HTTP instead of generating once and "
+            "exiting; see settings.serve_host/serve_port/serve_ttl"
+        ),
+    )
     return parser
+
+
+def write_feeds(
+    feeds: list[dict[str, str]],
+    output_dir: Path,
+    copy_dir: Path | None,
+    max_items: int,
+) -> None:
+    """Generate each feed once and write it (plus an optional copy) to disk."""
+    cache_path = output_dir / CACHE_FILENAME
+    cache = load_cache(cache_path)
+    for feed_cfg in feeds:
+        out_path = output_dir / feed_cfg["output"]
+
+        log.info("=== %s ===", feed_cfg["name"])
+        xml = generate_feed(feed_cfg, cache, max_items=max_items)
+        out_path.write_text(xml, encoding="utf-8")
+        log.info("Written: %s", out_path)
+        if copy_dir:
+            dest_path = copy_dir / feed_cfg["output"]
+            shutil.copy2(out_path, dest_path)
+            log.info("Copied to: %s", dest_path)
+    save_cache(cache_path, cache)
 
 
 def main() -> None:
@@ -872,11 +1116,14 @@ def main() -> None:
     settings = config.get("settings", {})
     max_items = settings.get("max_items", 20)
     output_dir = Path(settings.get("output_dir", "."))
+    FLARESOLVERR.url = settings.get("flaresolverr_url") or None
 
     feeds = config.get("feeds", [])
     if not feeds:
         log.error("No feeds defined in %s", config_path)
         sys.exit(1)
+    for feed_cfg in feeds:
+        feed_cfg["output"] = output_filename(feed_cfg)
 
     # Filter by --feed
     if args.feed:
@@ -892,37 +1139,28 @@ def main() -> None:
 
     if args.list:
         for f in feeds:
-            out = output_dir / f.get(
-                "output", re.sub(r"[^a-z0-9]+", "-", f["name"].lower()) + ".xml"
-            )
             print(f"  {f['name']:<40}  {f['url']}")
-            print(f"  {'':40}  -> {out}")
+            print(f"  {'':40}  -> {output_dir / f['output']}")
         return
 
-    # Generate all (or filtered) feeds to disk
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.serve:
+        serve_config = ServeConfig(
+            output_dir=output_dir,
+            cache_path=output_dir / CACHE_FILENAME,
+            max_items=max_items,
+            ttl=settings.get("serve_ttl", DEFAULT_SERVE_TTL),
+            host=settings.get("serve_host", DEFAULT_SERVE_HOST),
+            port=settings.get("serve_port", DEFAULT_SERVE_PORT),
+        )
+        serve(feeds, serve_config)
+        return
+
     copy_dir = Path(args.copy) if args.copy else None
     if copy_dir:
         copy_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = output_dir / CACHE_FILENAME
-    cache = load_cache(cache_path)
-    for feed_cfg in feeds:
-        name = feed_cfg["name"]
-        out_name = feed_cfg.get(
-            "output",
-            re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") + ".xml",
-        )
-        out_path = output_dir / out_name
-
-        log.info("=== %s ===", name)
-        xml = generate_feed(feed_cfg, cache, max_items=max_items)
-        out_path.write_text(xml, encoding="utf-8")
-        log.info("Written: %s", out_path)
-        if copy_dir:
-            dest_path = copy_dir / out_name
-            shutil.copy2(out_path, dest_path)
-            log.info("Copied to: %s", dest_path)
-    save_cache(cache_path, cache)
+    write_feeds(feeds, output_dir, copy_dir, max_items)
 
 
 if __name__ == "__main__":

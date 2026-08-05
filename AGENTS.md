@@ -76,6 +76,17 @@ deliberate choice, not a convenience:
 - Match `ruff`'s floor in `[dependency-groups]` to the version pinned in
   `.pre-commit-config.yaml` when bumping either one, so local runs,
   `uv run`, and the pre-commit hook stay consistent.
+- `--serve` and the FlareSolverr fallback added no new dependencies — the
+  HTTP server is stdlib `http.server`/`threading`, and FlareSolverr's API is
+  called with the already-present `requests`. Keep it that way; don't reach
+  for a web framework for `--serve`.
+- `Dockerfile` pins `ghcr.io/astral-sh/uv:0.12.1` by exact tag (no
+  `latest`) for the `uv` binary used only in the build stage, matching the
+  no-version-ranges pinning discipline used everywhere else. The runtime
+  stage copies just `/app/.venv` and `crap2feed.py` out of the build stage —
+  no `uv`/pip in the final image at all. Bump the pinned `uv` tag
+  deliberately (same review lens as any other dependency bump), not as a
+  drive-by edit.
 
 ## Two index-scraping strategies: anchors, then `__NEXT_DATA__`
 
@@ -141,6 +152,47 @@ without understanding why they're there:
   (`RETRY_TOTAL`, `RETRY_BACKOFF_FACTOR`, `RETRY_STATUS_FORCELIST`,
   `respect_retry_after_header=True`) in `build_session()`, not hand-rolled
   — prefer extending the `Retry` config over adding a manual retry loop.
+- `fetch()` dispatches to `_fetch_direct()` first, falling back to
+  `fetch_via_flaresolverr()` only on a 403 when `FLARESOLVERR.url` is set
+  (from `settings.flaresolverr_url`). `FLARESOLVERR.hosts` remembers which
+  hosts needed it this run so later requests skip the doomed direct attempt.
+  **This is the one place that knowingly loses a safety property above**:
+  FlareSolverr resolves redirects itself inside its own headless browser and
+  only hands back the final HTML, so the same-host redirect check in
+  `_fetch_direct()` never runs for FlareSolverr-routed requests. Enabling
+  FlareSolverr for a host means trusting FlareSolverr's own egress/redirect
+  handling for it — acceptable for a self-hosted tool with a fixed, known
+  blog list, but don't extend the fallback to anything beyond a plain 403
+  (e.g. don't start sniffing response bodies for Cloudflare challenge markup)
+  without re-thinking this tradeoff.
+- `FLARESOLVERR` is a small mutable dataclass instance (`FlareSolverrState`),
+  not a plain `str | None` module global — `main()` sets `FLARESOLVERR.url`
+  as an attribute assignment rather than rebinding a module-level name, so
+  it doesn't need (and ruff's `PLW0603` would otherwise flag) a `global`
+  statement. `SESSION.headers["User-Agent"]` mutation for `--agent firefox`
+  follows the same "mutate an object's attribute, don't rebind the name"
+  shape.
+
+## `--serve`: on-demand generation, not a general static file server
+
+`FeedServer` (a `ThreadingHTTPServer`) and `FeedHandler` back the `--serve`
+flag. Two things to preserve if you touch this:
+
+- `FeedHandler.do_GET` matches `self.path.lstrip("/")` against
+  `feeds_by_output` **exactly** — it is not a directory listing or general
+  file server over `output_dir`. `output_dir` also contains
+  `.crap2feed_cache.json` (raw scraped metadata) and, in principle, only the
+  configured `output` filenames should ever be reachable over HTTP. Don't
+  swap this for `http.server.SimpleHTTPRequestHandler` or similar without
+  re-adding that allowlist.
+- `FeedServer.feed_locks` is pre-populated for every configured feed at
+  construction time, not created lazily on first request — creating a
+  `threading.Lock()` lazily (`feed_locks.setdefault(...)`) would itself be a
+  race between concurrent request threads for a feed neither has seen yet.
+  `cache_lock` is separate and narrower: it only wraps `save_cache()` (the
+  shared on-disk JSON write), not feed generation itself, so two different
+  feeds regenerating at the same time don't serialize on one lock — only the
+  disk write of the shared cache dict does.
 
 ## Gotchas already hit in this repo
 

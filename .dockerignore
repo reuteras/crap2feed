@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+__pycache__
+*.py[oc]
+*.egg-info
+crap2feed.yaml
+feeds
+.crap2feed_cache.json
+.pre-commit-config.yaml
+.osv-scanner.toml

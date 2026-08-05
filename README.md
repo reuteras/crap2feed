@@ -175,7 +175,9 @@ a container" below.
 The included `Dockerfile` builds a small image (two-stage: `uv` only exists
 in the build stage, the runtime image has no package manager at all) that
 runs `crap2feed --serve`. Config and generated feeds live on a `/data`
-volume.
+volume. The container runs as uid/gid 1000 (not root); if your host's
+first user isn't uid 1000, `chown -R 1000:1000` the directory you bind-mount
+to `/data`.
 
 ```sh
 docker build -t crap2feed .

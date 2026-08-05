@@ -26,6 +26,10 @@ feeds:
     url: https://intezer.com/blog
     output: intezer.xml
 
+  - name: NCSC-SE Aktuellt
+    url: https://www.ncsc.se/sv/aktuellt/
+    output: cert-se.xml
+
   - name: Pillar Security Blog
     url: https://www.pillar.security/blog
     output: pillar.xml

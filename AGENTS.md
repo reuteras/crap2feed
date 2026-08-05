@@ -156,7 +156,7 @@ without understanding why they're there:
   `fetch_via_flaresolverr()` only on a 403 when `FLARESOLVERR.url` is set
   (from `settings.flaresolverr_url`). `FLARESOLVERR.hosts` remembers which
   hosts needed it this run so later requests skip the doomed direct attempt.
-  **This is the one place that knowingly loses a safety property above**:
+  __This is the one place that knowingly loses a safety property above__:
   FlareSolverr resolves redirects itself inside its own headless browser and
   only hands back the final HTML, so the same-host redirect check in
   `_fetch_direct()` never runs for FlareSolverr-routed requests. Enabling
@@ -179,7 +179,7 @@ without understanding why they're there:
 flag. Two things to preserve if you touch this:
 
 - `FeedHandler.do_GET` matches `self.path.lstrip("/")` against
-  `feeds_by_output` **exactly** — it is not a directory listing or general
+  `feeds_by_output` __exactly__ — it is not a directory listing or general
   file server over `output_dir`. `output_dir` also contains
   `.crap2feed_cache.json` (raw scraped metadata) and, in principle, only the
   configured `output` filenames should ever be reachable over HTTP. Don't

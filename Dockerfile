@@ -21,12 +21,26 @@ RUN uv sync --frozen --no-dev
 # the app module, to keep the runtime attack surface small.
 FROM python:3.14-slim AS runtime
 
+# uid/gid 1000 matches the default first-user uid on most Linux hosts, so a
+# bind-mounted ./something:/data (see README) is writable without an extra
+# chown on the host side in the common case.
+RUN groupadd --gid 1000 crap2feed \
+    && useradd --uid 1000 --gid crap2feed --home-dir /data --shell /usr/sbin/nologin crap2feed \
+    && mkdir -p /data \
+    && chown crap2feed:crap2feed /data
+
 WORKDIR /app
-COPY --from=builder /app/.venv /app/.venv
-COPY crap2feed.py ./
+COPY --from=builder --chown=crap2feed:crap2feed /app/.venv /app/.venv
+COPY --chown=crap2feed:crap2feed crap2feed.py ./
 
 EXPOSE 8002
 VOLUME ["/data"]
+USER crap2feed
+
+# --serve doesn't expose a fixed "/" route (see AGENTS.md), so this only
+# checks that something is listening on the port, not a specific response.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python3 -c "import socket; socket.create_connection(('127.0.0.1', 8002), 3).close()" || exit 1
 
 ENTRYPOINT ["/app/.venv/bin/crap2feed"]
 CMD ["--config", "/data/crap2feed.yaml", "--serve"]

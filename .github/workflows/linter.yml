@@ -13,6 +13,10 @@ on:
 
 permissions:
   contents: read
+  # issues and pull-requests permissions let super-linter post its
+  # pass/fail summary as a pull request comment.
+  issues: write
+  pull-requests: write
   statuses: write
 
 # A workflow run is made up of one or more jobs that can run sequentially

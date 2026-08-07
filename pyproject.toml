@@ -42,7 +42,7 @@ build-backend = "setuptools.build_meta"
 py-modules = ["crap2feed"]
 
 [dependency-groups]
-dev = ["mypy>=2.3.0", "ruff>=0.16.0"]
+dev = ["mypy>=2.3.0", "ruff>=0.16.1"]
 
 [tool.ruff]
 target-version = "py311"

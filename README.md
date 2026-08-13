@@ -32,7 +32,7 @@ uv sync
 ```
 
 This installs the runtime dependencies (`beautifulsoup4`, `pyyaml`,
-`requests`) and the `crap2feed` command inside `.venv`.
+`requests`, `urllib3`) and the `crap2feed` command inside `.venv`.
 
 ## Configuration
 
@@ -58,6 +58,10 @@ feeds:
   - name: Sekoia Blog
     url: https://www.sekoia.com/blog
     output: sekoia.xml
+
+  - name: AAIF Blog
+    url: https://aaif.io/blog
+    output: aaif.xml
 ```
 
 Edit `feeds` to point at the blog index pages you want feeds for. `output`
@@ -263,7 +267,7 @@ uv run mypy crap2feed.py  # type-check
 
 [pre-commit](https://pre-commit.com/) hooks are configured in
 `.pre-commit-config.yaml` (ruff, generic file checks, editorconfig,
-zizmor). Install with `uv tool install pre-commit && pre-commit install`.
+markdownlint). Install with `uv tool install pre-commit && pre-commit install`.
 
 See [AGENTS.md](AGENTS.md) for conventions AI coding agents should follow
 in this repo.

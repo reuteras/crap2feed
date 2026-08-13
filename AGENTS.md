@@ -15,10 +15,7 @@ are in [README.md](README.md).
   `.crap2feed_cache.json`) are gitignored and only exist locally/at runtime.
   Don't assume they exist; `load_config` creates an example config if
   missing.
-- No test suite exists yet. `.github/workflows/tests.yml` references
-  `src/rwreader`, `READWISE_TOKEN`, and `tests/` — that's leftover from a
-  different project template and does not apply here; don't treat it as a
-  source of truth for how to test this repo.
+- No test suite exists yet.
 - CLI argument parsing lives in `build_parser()`, separate from `main()`,
   purely to stay under ruff's `PLR0915` (too-many-statements) limit — `main()`
   was already close to the ceiling before `--quiet`/`--copy` pushed it over.

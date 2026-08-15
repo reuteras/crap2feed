@@ -15,7 +15,12 @@ are in [README.md](README.md).
   `.crap2feed_cache.json`) are gitignored and only exist locally/at runtime.
   Don't assume they exist; `load_config` creates an example config if
   missing.
-- No test suite exists yet.
+- `tests/test_crap2feed.py` covers the pure-logic functions (date
+  parsing/formatting, XML escaping, `__NEXT_DATA__` scoring, anchor
+  scraping, Atom rendering) with stdlib-free unit tests via pytest — a
+  deliberate dev dependency, not one added speculatively (see dependency
+  policy below). Network-touching functions (`fetch`, `get_article_metadata`)
+  aren't covered; they'd need mocked HTTP. Run with `uv run pytest`.
 - CLI argument parsing lives in `build_parser()`, separate from `main()`,
   purely to stay under ruff's `PLR0915` (too-many-statements) limit — `main()`
   was already close to the ceiling before `--quiet`/`--copy` pushed it over.
@@ -31,12 +36,13 @@ are in [README.md](README.md).
 
 ## Before committing changes to crap2feed.py
 
-Run all three; the project's mypy/ruff config is strict on purpose:
+Run all four; the project's mypy/ruff config is strict on purpose:
 
 ```sh
 uv run ruff check .
 uv run ruff format .
 uv run mypy crap2feed.py
+uv run pytest
 ```
 
 - Every function must have full type annotations (`disallow_untyped_defs`,
@@ -60,16 +66,17 @@ Default to stdlib. Adding a new third-party dependency should be a
 deliberate choice, not a convenience:
 
 - Runtime deps (`beautifulsoup4`, `pyyaml`, `requests`, `urllib3`) and dev
-  deps (`ruff`, `mypy` in `[dependency-groups] dev`) are declared with `>=`
-  floors in `pyproject.toml`; `uv.lock` is the actual pin and must stay
-  committed and in sync (`uv sync --dev` after any manifest change).
+  deps (`ruff`, `mypy`, `pytest` in `[dependency-groups] dev`) are declared
+  with `>=` floors in `pyproject.toml`; `uv.lock` is the actual pin and must
+  stay committed and in sync (`uv sync --dev` after any manifest change).
   `urllib3` is declared directly (not left as an implicit transitive dep
   of `requests`) because `crap2feed.py` imports `urllib3.util.retry.Retry`
   directly, for the retry/backoff adapter — don't rely on a package you
   import only being present transitively.
-- Don't add `types-*` stub packages, testing frameworks, or other tooling
-  speculatively — if a task needs one, say so explicitly rather than
-  installing it silently.
+- `pytest` was a deliberate addition (see Tests below), not a speculative
+  one. Don't add `types-*` stub packages, additional test plugins, or other
+  tooling speculatively on top of it — if a task needs one, say so
+  explicitly rather than installing it silently.
 - Match `ruff`'s floor in `[dependency-groups]` to the version pinned in
   `.pre-commit-config.yaml` when bumping either one, so local runs,
   `uv run`, and the pre-commit hook stay consistent.

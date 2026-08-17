@@ -10,6 +10,14 @@ feeds:
     url: https://aaif.io/blog
     output: aaif.xml
 
+  - name: Anthropic news
+    url: https://www.anthropic.com/news
+    output: anthropic-news.xml
+
+  - name: Anthropic research
+    url: https://www.anthropic.com/research
+    output: anthropic-research.xml
+
   - name: Apple Security Research
     url: https://security.apple.com/blog
     output: apple.xml

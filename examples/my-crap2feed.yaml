@@ -26,6 +26,10 @@ feeds:
     url: https://bcsecurity.io/blog/
     output: bcsecurity.xml
 
+  - name: Black Lotus Labs
+    url: https://www.lumen.com/blog-and-news/en-us/black-lotus-labs
+    output: black-lotus.xml
+
   - name: Crowdstrike
     url: https://www.crowdstrike.com/en-us/blog/
     output: clownstrike.xml

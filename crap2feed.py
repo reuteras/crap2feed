@@ -223,8 +223,8 @@ SESSION = build_session()
 MAX_REDIRECTS = 5
 
 
-def _fetch_direct(url: str) -> BeautifulSoup:
-    """Fetch a URL directly and parse it into a BeautifulSoup document.
+def _fetch_direct_bytes(url: str) -> bytes:
+    """Fetch a URL directly and return its size-limited response body.
 
     The URL is remote, untrusted content: redirects are resolved by hand
     (allow_redirects=False) so each hop's host can be checked *before* it is
@@ -259,9 +259,19 @@ def _fetch_direct(url: str) -> BeautifulSoup:
                 raise ValueError(
                     f"response for {url} exceeded {MAX_RESPONSE_BYTES} bytes"
                 )
-        return BeautifulSoup(bytes(content), "html.parser")
+        return bytes(content)
 
     raise ValueError(f"too many redirects fetching {url}")
+
+
+def _fetch_direct(url: str) -> BeautifulSoup:
+    """Fetch a URL directly and parse it into a BeautifulSoup document."""
+    return BeautifulSoup(_fetch_direct_bytes(url), "html.parser")
+
+
+def fetch_json(url: str) -> Any:
+    """Fetch and decode a same-host, size-limited JSON resource directly."""
+    return json.loads(_fetch_direct_bytes(url))
 
 
 def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
@@ -439,6 +449,8 @@ NEXTDATA_DESCRIPTION_KEYS = ("description", "excerpt", "summary")
 NEXTDATA_DATE_BONUS = 100
 NEXTDATA_DESCRIPTION_BONUS = 50
 
+PUBLIC_BLOG_INDEX_PATH = "/bin/blog/blog-index.json"
+
 
 def find_nextdata_json(soup: BeautifulSoup) -> Any:
     """Return the parsed payload of a Next.js __NEXT_DATA__ script tag, if any."""
@@ -540,6 +552,74 @@ def scrape_index_nextdata(blog_url: str, soup: BeautifulSoup) -> list[dict[str, 
     return list(articles.values())
 
 
+def public_blog_index_items_to_articles(
+    blog_url: str, data: Any
+) -> list[dict[str, str]]:
+    """Convert entries from a public ``/bin/blog/blog-index.json`` index."""
+    if not isinstance(data, list):
+        return []
+
+    parsed_blog = urlparse(blog_url)
+    base = f"{parsed_blog.scheme}://{parsed_blog.netloc}"
+    page_category = parsed_blog.path.rstrip("/").rsplit("/", 1)[-1].lower()
+    articles: list[dict[str, str]] = []
+    category_matches: list[dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        path = item.get("url")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(path, str):
+            continue
+        article_url = (
+            base + "/blog" + path
+            if path.startswith("/en-us/")
+            else urljoin(base + "/", path)
+        )
+        parsed_article = urlparse(article_url)
+        if (
+            parsed_article.scheme not in ("http", "https")
+            or parsed_article.netloc != parsed_blog.netloc
+        ):
+            continue
+        article = {
+            "url": article_url,
+            "title": title.strip(),
+            "date_str": str(item.get("blogPublishedDate") or "").strip(),
+        }
+        description = item.get("description")
+        if isinstance(description, str) and description.strip():
+            article["description"] = description.strip()
+        articles.append(article)
+        categories = item.get("categories")
+        if isinstance(categories, list):
+            category_names = {
+                str(category).rsplit("/", 1)[-1].lower() for category in categories
+            }
+            if (
+                page_category in category_names
+                or page_category.removesuffix("s") in category_names
+            ):
+                category_matches.append(article)
+    return category_matches or articles
+
+
+def scrape_index_public_blog_json(blog_url: str) -> list[dict[str, str]]:
+    """Try the conventional same-host public JSON blog-index path."""
+    parsed = urlparse(blog_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return []
+    index_url = f"{parsed.scheme}://{parsed.netloc}{PUBLIC_BLOG_INDEX_PATH}"
+    try:
+        data = fetch_json(index_url)
+    except Exception as e:
+        log.info("No public blog index at %s: %s", index_url, e)
+        return []
+    return public_blog_index_items_to_articles(blog_url, data)
+
+
 def scrape_index_anchors(
     blog_url: str, soup: BeautifulSoup
 ) -> dict[str, dict[str, str]]:
@@ -623,6 +703,10 @@ def scrape_index(blog_url: str, max_items: int = 25) -> list[dict[str, str]]:
         article_list = scrape_index_nextdata(blog_url, soup)
         if article_list:
             log.info("No <a> links found; using embedded __NEXT_DATA__ post list")
+    if not article_list:
+        article_list = scrape_index_public_blog_json(blog_url)
+        if article_list:
+            log.info("No post links found; using public JSON blog index")
 
     def sort_key(item: dict[str, str]) -> datetime:
         dt = parse_date(item["date_str"])

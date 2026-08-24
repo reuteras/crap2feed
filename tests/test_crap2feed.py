@@ -15,6 +15,7 @@ from crap2feed import (
     nextdata_item_to_article,
     output_filename,
     parse_date,
+    public_blog_index_items_to_articles,
     score_nextdata_post_list,
     scrape_index_anchors,
     to_rfc3339,
@@ -225,6 +226,74 @@ class TestScrapeIndexAnchors:
         html = '<html><body><a href="/blog/2026/01/some-article">Some article</a></body></html>'
         soup = BeautifulSoup(html, "html.parser")
         assert scrape_index_anchors("https://example.com/blog", soup) == {}
+
+
+class TestPublicBlogIndexItemsToArticles:
+    """Tests for conventional public blog-index conversion."""
+
+    def test_keeps_only_black_lotus_articles(self) -> None:
+        """Only complete entries bearing Lumen's Black Lotus category are kept."""
+        data = [
+            {
+                "title": "A botnet report",
+                "description": "Research summary",
+                "url": "/en-us/a-botnet-report",
+                "blogPublishedDate": "July 24, 2026",
+                "categories": ["blog-and-news:categories/black-lotus-lab"],
+            },
+            {
+                "title": "Other Lumen post",
+                "url": "/en-us/other-post",
+                "categories": ["blog-and-news:categories/topics/cloud-computing"],
+            },
+        ]
+        assert public_blog_index_items_to_articles(
+            "https://www.lumen.com/blog-and-news/en-us/black-lotus-labs", data
+        ) == [
+            {
+                "url": "https://www.lumen.com/blog/en-us/a-botnet-report",
+                "title": "A botnet report",
+                "date_str": "July 24, 2026",
+                "description": "Research summary",
+            }
+        ]
+
+    def test_rejects_invalid_payload_and_paths(self) -> None:
+        """Unexpected JSON shapes and non-blog paths do not become fetch targets."""
+        url = "https://www.lumen.com/blog-and-news/en-us/black-lotus-labs"
+        assert public_blog_index_items_to_articles(url, {}) == []
+        assert (
+            public_blog_index_items_to_articles(
+                url,
+                [
+                    {
+                        "title": "Off-site",
+                        "url": "https://evil.example/post",
+                        "categories": ["blog-and-news:categories/black-lotus-lab"],
+                    }
+                ],
+            )
+            == []
+        )
+
+    def test_uses_all_articles_when_page_has_no_matching_category(self) -> None:
+        """A general blog page can consume an unfiltered index."""
+        data = [
+            {
+                "title": "A post",
+                "url": "/blog/a-post",
+                "blogPublishedDate": "August 24, 2026",
+            }
+        ]
+        assert public_blog_index_items_to_articles(
+            "https://example.com/blog", data
+        ) == [
+            {
+                "url": "https://example.com/blog/a-post",
+                "title": "A post",
+                "date_str": "August 24, 2026",
+            }
+        ]
 
 
 class TestBuildAtom:

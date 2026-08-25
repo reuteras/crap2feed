@@ -281,7 +281,12 @@ def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
     its own browser session — crap2feed never sees the intermediate hops, so
     the same-host redirect guard in _fetch_direct() doesn't apply here.
     Enabling FlareSolverr means trusting its own network egress for the
-    hosts routed through it.
+    hosts routed through it. The response body still embeds whatever the
+    hostile/compromised remote site sent back, so it's streamed and capped
+    at MAX_RESPONSE_BYTES the same way _fetch_direct_bytes() caps a direct
+    fetch — calling r.json() here instead would make `requests` buffer the
+    entire body into memory before any size check could run, the same
+    too-late-to-matter mistake the redirect handling above avoids.
     """
     payload: dict[str, Any] = {
         "cmd": "request.get",
@@ -289,15 +294,23 @@ def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
         "maxTimeout": FLARESOLVERR_TIMEOUT_MS,
     }
     r = requests.post(
-        cast(str, FLARESOLVERR.url), json=payload, timeout=FLARESOLVERR_REQUEST_TIMEOUT
+        cast(str, FLARESOLVERR.url),
+        json=payload,
+        timeout=FLARESOLVERR_REQUEST_TIMEOUT,
+        stream=True,
     )
     r.raise_for_status()
-    data = r.json()
+    content = bytearray()
+    for chunk in r.iter_content(chunk_size=65536):
+        content += chunk
+        if len(content) > MAX_RESPONSE_BYTES:
+            raise ValueError(
+                f"FlareSolverr response for {url} exceeded {MAX_RESPONSE_BYTES} bytes"
+            )
+    data = json.loads(content)
     if data.get("status") != "ok":
         raise ValueError(f"FlareSolverr could not fetch {url}: {data.get('message')}")
     html = data.get("solution", {}).get("response", "")
-    if len(html.encode("utf-8")) > MAX_RESPONSE_BYTES:
-        raise ValueError(f"response for {url} exceeded {MAX_RESPONSE_BYTES} bytes")
     return BeautifulSoup(html, "html.parser")
 
 

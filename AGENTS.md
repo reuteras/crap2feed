@@ -215,7 +215,13 @@ without understanding why they're there:
   handling for it — acceptable for a self-hosted tool with a fixed, known
   blog list, but don't extend the fallback to anything beyond a plain 403
   (e.g. don't start sniffing response bodies for Cloudflare challenge markup)
-  without re-thinking this tradeoff.
+  without re-thinking this tradeoff. `fetch_via_flaresolverr` still applies
+  the same `MAX_RESPONSE_BYTES` cap as `_fetch_direct_bytes`, and for the
+  same reason: it streams the POST response (`stream=True` +
+  `r.iter_content`) and aborts mid-download once the cap is hit, rather than
+  calling `r.json()` — which would force `requests` to buffer the whole body
+  into memory before any size check could run. If you touch this function,
+  keep the check *during* the download, not after it.
 - `FLARESOLVERR` is a small mutable dataclass instance (`FlareSolverrState`),
   not a plain `str | None` module global — `main()` sets `FLARESOLVERR.url`
   as an attribute assignment rather than rebinding a module-level name, so

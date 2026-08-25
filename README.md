@@ -166,6 +166,14 @@ a container" below.
   spoofed browser UA if a site otherwise blocks non-browser clients.
 - Fetches are sequential (no concurrency) with a polite delay between
   newly-fetched articles; cached articles are skipped entirely.
+- The index page can be scraped several different ways (plain `<a>` links,
+  an embedded `__NEXT_DATA__` post list, a site's public JSON blog index),
+  tried in order until one works. Once a feed's working strategy is known,
+  it's remembered in the cache and tried first on every later run instead
+  of re-probing every strategy — so the extra request(s) needed to figure
+  out how a new blog type works are only ever spent once. The same applies
+  to hosts that need FlareSolverr: once discovered, that's remembered too
+  instead of re-triggering a wasted direct request/403 every run.
 - On rate-limiting or transient server errors (429/500/502/503/504),
   requests are retried with backoff, honoring a `Retry-After` header when
   the server sends one, instead of immediately giving up or hammering

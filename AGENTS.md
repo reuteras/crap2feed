@@ -15,6 +15,15 @@ are in [README.md](README.md).
   `.crap2feed_cache.json`) are gitignored and only exist locally/at runtime.
   Don't assume they exist; `load_config` creates an example config if
   missing.
+- `.crap2feed_cache.json`'s top level is keyed by feed name, but also holds
+  one reserved key, `CACHE_HOSTS_KEY` (`"__hosts__"`), for FlareSolverr host
+  state. Each per-feed dict is keyed by article URL, but also holds one
+  reserved key, `CACHE_META_KEY` (`"__meta__"`), for that feed's remembered
+  index strategy. Both reserved keys deliberately reuse the existing
+  `dict[str, dict[str, str]]` shape rather than needing a schema change —
+  see "Remembering how to reach a site" below. Anything that iterates feed
+  names or article URLs in the cache must skip these keys (see the stale-
+  entry cleanup in `generate_feed`).
 - `tests/test_crap2feed.py` covers the pure-logic functions (date
   parsing/formatting, XML escaping, `__NEXT_DATA__` scoring, anchor
   scraping, Atom rendering) with stdlib-free unit tests via pytest — a
@@ -92,7 +101,7 @@ deliberate choice, not a convenience:
   deliberately (same review lens as any other dependency bump), not as a
   drive-by edit.
 
-## Two index-scraping strategies: anchors, then `__NEXT_DATA__`
+## Three index-scraping strategies, tried in order until one works
 
 `scrape_index` tries `scrape_index_anchors` first (the original strategy:
 walk `<a href>` tags on the index page). If that finds nothing —
@@ -105,15 +114,51 @@ entries (has a title-like key from `NEXTDATA_TITLE_KEYS` and a link-like
 key from `NEXTDATA_LINK_KEYS`), then picks the best-scoring candidate
 (`score_nextdata_post_list`, biased toward lists that also carry date/
 description keys — a site's JSON can embed more than one dict-list shape,
-e.g. related posts alongside the full index).
+e.g. related posts alongside the full index). If that also finds nothing,
+it falls back to `scrape_index_public_blog_json`, which fetches a
+conventional same-host `/bin/blog/blog-index.json` (`PUBLIC_BLOG_INDEX_PATH`)
+— a *different URL* from the blog's HTML page entirely, unlike the other
+two strategies which both parse the one page already fetched for `soup`.
 
-This fallback is deliberately generic (keyed off the presence of
-`__NEXT_DATA__` + shape-matching, not any Apple-specific string) since
-other "crap blogs" use the same Next.js pattern. If you add a third
-strategy for some other rendering pattern, follow the same shape: a
-function returning `list[dict[str, str]]` with `{url, title, date_str}`
-(optionally `description`), tried only when the earlier strategies come up
-empty, not merged with them.
+Each strategy is deliberately generic (keyed off shape-matching — presence
+of `__NEXT_DATA__`, or a JSON list of dicts with title/url/date-ish keys —
+not any site-specific string), since more than one "crap blog" can share
+the same rendering/CMS pattern. If you add a fourth strategy for some other
+pattern, follow the same shape: a function returning `list[dict[str, str]]`
+with `{url, title, date_str}` (optionally `description`), tried only when
+the earlier strategies come up empty, not merged with them. Also add its
+name as an `INDEX_STRATEGY_*` constant and teach `scrape_index`'s ordering
+logic about it (see below) — don't let a new strategy bypass the memoization.
+
+### Remembering how to reach a site
+
+Every new strategy added here is a strategy every *already-working* site
+also pays to skip past on every single run, and (worse) a strategy that
+fetches its own URL — like `scrape_index_public_blog_json` — costs a real
+extra HTTP request on every run for a site that only ever works that way.
+To keep that a one-time cost instead of a permanent tax:
+
+- `generate_feed` reads the feed's last-known strategy from
+  `feed_cache[CACHE_META_KEY]["index_strategy"]` and passes it to
+  `scrape_index` as `known_strategy`. `scrape_index` tries that strategy
+  first; only if it comes up empty (site changed layout, or this is the
+  first run and there's no known strategy yet) does it fall back to probing
+  all strategies in the default order. Whichever strategy actually produced
+  articles is written back to the cache.
+- Critically, when `known_strategy == INDEX_STRATEGY_PUBLIC_JSON`,
+  `scrape_index` tries it *before* fetching the blog's HTML page at all —
+  since that strategy doesn't use the HTML `soup`, a site known to need it
+  costs exactly one request per run (the JSON fetch), not two (HTML fetch
+  that goes nowhere, plus the JSON fetch). Preserve this ordering if you
+  touch `scrape_index`; don't reintroduce an unconditional `fetch(blog_url)`
+  at the top of the function.
+- The same problem exists for FlareSolverr: `FLARESOLVERR.hosts` (in-memory,
+  see below) is now mirrored into `cache[CACHE_HOSTS_KEY]` via
+  `seed_flaresolverr_hosts`/`save_flaresolverr_hosts`, called around
+  `load_cache`/`save_cache` in both `write_feeds` and `FeedServer`. Without
+  this, a host discovered to need FlareSolverr would rediscover that fact
+  (one wasted direct request that 403s) on every fresh process — e.g. every
+  cron invocation — forever, instead of just the first time.
 
 ## Remote content is untrusted — security invariants in fetch()/scrape_index()
 
@@ -159,7 +204,9 @@ without understanding why they're there:
 - `fetch()` dispatches to `_fetch_direct()` first, falling back to
   `fetch_via_flaresolverr()` only on a 403 when `FLARESOLVERR.url` is set
   (from `settings.flaresolverr_url`). `FLARESOLVERR.hosts` remembers which
-  hosts needed it this run so later requests skip the doomed direct attempt.
+  hosts needed it so later requests skip the doomed direct attempt —
+  this now persists across process restarts too, via the on-disk cache
+  (see "Remembering how to reach a site" above), not just within one run.
   __This is the one place that knowingly loses a safety property above__:
   FlareSolverr resolves redirects itself inside its own headless browser and
   only hands back the final HTML, so the same-host redirect check in

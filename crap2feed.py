@@ -686,34 +686,81 @@ def scrape_index_anchors(
     return articles
 
 
-def scrape_index(blog_url: str, max_items: int = 25) -> list[dict[str, str]]:
+INDEX_STRATEGY_ANCHORS = "anchors"
+INDEX_STRATEGY_NEXTDATA = "nextdata"
+INDEX_STRATEGY_PUBLIC_JSON = "public_json"
+
+
+def _try_html_index_strategy(
+    name: str, blog_url: str, soup: BeautifulSoup
+) -> list[dict[str, str]]:
+    """Run one of the HTML-based index strategies against an already-fetched page."""
+    if name == INDEX_STRATEGY_ANCHORS:
+        return list(scrape_index_anchors(blog_url, soup).values())
+    if name == INDEX_STRATEGY_NEXTDATA:
+        return scrape_index_nextdata(blog_url, soup)
+    return []
+
+
+def scrape_index(
+    blog_url: str, max_items: int = 25, known_strategy: str | None = None
+) -> tuple[list[dict[str, str]], str]:
     """Scrape the blog index page.
 
-    Returns list of {url, title, date_str} sorted newest-first.
+    `known_strategy` is the strategy that worked last time (from the
+    cache), if any -- trying it first avoids re-probing every strategy on
+    every run. This matters most for INDEX_STRATEGY_PUBLIC_JSON, which
+    fetches a completely different URL from the blog's HTML page: a site
+    known to only work that way skips fetching the (unused) HTML index
+    entirely, instead of paying for both requests forever. If the known
+    strategy comes up empty (e.g. the site changed layout), this falls
+    back to probing all strategies as usual.
+
+    Returns (articles sorted newest-first and capped to max_items, the
+    name of the strategy that produced them -- "" if none did).
     """
     log.info("Fetching index: %s", blog_url)
-    try:
-        soup = fetch(blog_url)
-    except Exception as e:
-        log.error("Failed to fetch index %s: %s", blog_url, e)
-        return []
 
-    article_list = list(scrape_index_anchors(blog_url, soup).values())
-    if not article_list:
-        article_list = scrape_index_nextdata(blog_url, soup)
-        if article_list:
-            log.info("No <a> links found; using embedded __NEXT_DATA__ post list")
-    if not article_list:
+    article_list: list[dict[str, str]] = []
+    used_strategy = ""
+
+    if known_strategy == INDEX_STRATEGY_PUBLIC_JSON:
         article_list = scrape_index_public_blog_json(blog_url)
         if article_list:
-            log.info("No post links found; using public JSON blog index")
+            used_strategy = INDEX_STRATEGY_PUBLIC_JSON
+
+    if not article_list:
+        try:
+            soup = fetch(blog_url)
+        except Exception as e:
+            log.error("Failed to fetch index %s: %s", blog_url, e)
+            return [], used_strategy
+
+        html_strategies = [INDEX_STRATEGY_ANCHORS, INDEX_STRATEGY_NEXTDATA]
+        if known_strategy in html_strategies:
+            html_strategies.remove(known_strategy)
+            html_strategies.insert(0, known_strategy)
+
+        for strategy_name in html_strategies:
+            article_list = _try_html_index_strategy(strategy_name, blog_url, soup)
+            if article_list:
+                used_strategy = strategy_name
+                if strategy_name != INDEX_STRATEGY_ANCHORS:
+                    log.info("Using '%s' index strategy", strategy_name)
+                break
+
+        if not article_list and known_strategy != INDEX_STRATEGY_PUBLIC_JSON:
+            article_list = scrape_index_public_blog_json(blog_url)
+            if article_list:
+                log.info("Using '%s' index strategy", INDEX_STRATEGY_PUBLIC_JSON)
+                used_strategy = INDEX_STRATEGY_PUBLIC_JSON
 
     def sort_key(item: dict[str, str]) -> datetime:
         dt = parse_date(item["date_str"])
         return dt or datetime.min.replace(tzinfo=UTC)
 
     sorted_articles = sorted(article_list, key=sort_key, reverse=True)
-    return sorted_articles[:max_items]
+    return sorted_articles[:max_items], used_strategy
 
 
 # ── Feed building ──────────────────────────────────────────────────────────────
@@ -800,19 +847,27 @@ def generate_feed(
 ) -> str:
     """Generate Atom XML for one feed config entry.
 
-    `cache` maps feed name -> {article url -> metadata}. Articles already
-    present in the cache are reused as-is instead of being re-fetched, so
-    that unchanged items don't appear to update on every run and so that
-    we don't hammer the source site for pages we've already seen.
+    `cache` maps feed name -> {article url -> metadata}, plus one reserved
+    entry per feed (CACHE_META_KEY) recording which index strategy last
+    worked for it. Articles already present in the cache are reused as-is
+    instead of being re-fetched, so that unchanged items don't appear to
+    update on every run and so that we don't hammer the source site for
+    pages we've already seen. The remembered strategy serves the same
+    purpose for the index page itself: see scrape_index().
     """
     name = cfg["name"]
     url = cfg["url"]
     feed_cache = cache.setdefault(name, {})
+    known_strategy = feed_cache.get(CACHE_META_KEY, {}).get("index_strategy")
 
-    articles = scrape_index(url, max_items=max_items)
+    articles, used_strategy = scrape_index(
+        url, max_items=max_items, known_strategy=known_strategy
+    )
     if not articles:
         log.warning("[%s] No articles found on index page.", name)
         return build_atom(name, url, [])
+    if used_strategy:
+        feed_cache[CACHE_META_KEY] = {"index_strategy": used_strategy}
 
     new_count = sum(1 for a in articles if a["url"] not in feed_cache)
     log.info(
@@ -849,10 +904,11 @@ def generate_feed(
             "date": a.get("date", ""),
         }
 
-    # Drop cache entries for articles that fell off the index page.
+    # Drop cache entries for articles that fell off the index page (but
+    # keep the reserved strategy entry, which isn't an article URL).
     current_urls = {a["url"] for a in articles}
     for stale_url in list(feed_cache):
-        if stale_url not in current_urls:
+        if stale_url != CACHE_META_KEY and stale_url not in current_urls:
             del feed_cache[stale_url]
 
     return build_atom(name, url, articles)
@@ -901,6 +957,13 @@ def load_config(path: Path) -> dict[str, Any]:
 
 CACHE_FILENAME = ".crap2feed_cache.json"
 
+# Reserved keys mixed into the cache alongside real feed names / article
+# URLs. Both fit the existing dict[str, dict[str, str]] shape, so they
+# don't need a schema change -- just care to skip them where the code
+# iterates feed names or article URLs.
+CACHE_META_KEY = "__meta__"  # per-feed: {"index_strategy": "..."}
+CACHE_HOSTS_KEY = "__hosts__"  # top-level: {netloc: {"flaresolverr": "1"}}
+
 
 def load_cache(path: Path) -> dict[str, dict[str, dict[str, str]]]:
     """Load the article metadata cache from disk, if present."""
@@ -919,6 +982,27 @@ def save_cache(path: Path, cache: dict[str, dict[str, dict[str, str]]]) -> None:
         path.write_text(json.dumps(cache, indent=2))
     except OSError as e:
         log.warning("Could not write cache file %s: %s", path, e)
+
+
+def seed_flaresolverr_hosts(cache: dict[str, dict[str, dict[str, str]]]) -> None:
+    """Restore hosts previously found to need FlareSolverr.
+
+    Without this, each fresh process (e.g. a new cron run) has to rediscover
+    that a host needs FlareSolverr by spending one wasted direct request that
+    gets a 403 before it falls back -- forever. Seeding FLARESOLVERR.hosts
+    from the persisted cache means that discovery only happens once.
+    """
+    hosts_meta = cache.get(CACHE_HOSTS_KEY, {})
+    for host, info in hosts_meta.items():
+        if info.get("flaresolverr") == "1":
+            FLARESOLVERR.hosts.add(host)
+
+
+def save_flaresolverr_hosts(cache: dict[str, dict[str, dict[str, str]]]) -> None:
+    """Persist hosts known (this run or a previous one) to need FlareSolverr."""
+    hosts_meta = cache.setdefault(CACHE_HOSTS_KEY, {})
+    for host in FLARESOLVERR.hosts:
+        hosts_meta[host] = {"flaresolverr": "1"}
 
 
 # ── HTTP serving ───────────────────────────────────────────────────────────────
@@ -962,6 +1046,7 @@ class FeedServer(ThreadingHTTPServer):
         self.output_dir = config.output_dir
         self.cache_path = config.cache_path
         self.cache = load_cache(config.cache_path)
+        seed_flaresolverr_hosts(self.cache)
         self.max_items = config.max_items
         self.ttl = config.ttl
         self.cache_lock = threading.Lock()
@@ -983,6 +1068,7 @@ class FeedServer(ThreadingHTTPServer):
             xml = generate_feed(feed_cfg, self.cache, max_items=self.max_items)
             out_path.write_text(xml, encoding="utf-8")
             with self.cache_lock:
+                save_flaresolverr_hosts(self.cache)
                 save_cache(self.cache_path, self.cache)
             return xml
 
@@ -1058,7 +1144,7 @@ def check_url(url: str) -> None:
     Standalone command — no config file or output directory needed. Nothing
     is written to disk; this only prints what generate_feed() would produce.
     """
-    articles = scrape_index(url, max_items=CHECK_PREVIEW_ITEMS)
+    articles, _ = scrape_index(url, max_items=CHECK_PREVIEW_ITEMS)
     if not articles:
         log.error("No articles found at %s", url)
         log.error(
@@ -1161,6 +1247,7 @@ def write_feeds(
     """Generate each feed once and write it (plus an optional copy) to disk."""
     cache_path = output_dir / CACHE_FILENAME
     cache = load_cache(cache_path)
+    seed_flaresolverr_hosts(cache)
     for feed_cfg in feeds:
         out_path = output_dir / feed_cfg["output"]
 
@@ -1172,6 +1259,7 @@ def write_feeds(
             dest_path = copy_dir / feed_cfg["output"]
             shutil.copy2(out_path, dest_path)
             log.info("Copied to: %s", dest_path)
+    save_flaresolverr_hosts(cache)
     save_cache(cache_path, cache)
 
 

@@ -40,7 +40,7 @@ feeds:
 
   - name: NCSC-SE Aktuellt
     url: https://www.ncsc.se/sv/aktuellt/
-    output: cert-se.xml
+    output: ncsc-se.xml
 
   - name: Pillar Security Blog
     url: https://www.pillar.security/blog

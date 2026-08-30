@@ -34,6 +34,10 @@ feeds:
     url: https://www.crowdstrike.com/en-us/blog/
     output: clownstrike.xml
 
+  - name: Group-IB blog
+    url: https://www.group-ib.com/blog/
+    output: group-ib.xml
+
   - name: Intezer
     url: https://intezer.com/blog
     output: intezer.xml

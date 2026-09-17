@@ -42,6 +42,10 @@ feeds:
     url: https://intezer.com/blog
     output: intezer.xml
 
+  - name: The Mitten Mac
+    url: https://themittenmac.com/blog
+    output: mitten_mac.xml
+
   - name: NCSC-SE Aktuellt
     url: https://www.ncsc.se/sv/aktuellt/
     output: ncsc-se.xml

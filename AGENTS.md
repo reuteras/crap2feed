@@ -104,7 +104,8 @@ deliberate choice, not a convenience:
 ## Three index-scraping strategies, tried in order until one works
 
 `scrape_index` tries `scrape_index_anchors` first (the original strategy:
-walk `<a href>` tags on the index page). If that finds nothing —
+walk `<a href>` tags on the index page, requiring each link to live under
+the index page's own path). If that finds nothing —
 e.g. security.apple.com/blog, a Next.js app whose post list is rendered
 entirely client-side from JSON, with no `<a href>` markup for posts
 anywhere in the raw HTML — it falls back to `scrape_index_nextdata`, which
@@ -115,16 +116,27 @@ key from `NEXTDATA_LINK_KEYS`), then picks the best-scoring candidate
 (`score_nextdata_post_list`, biased toward lists that also carry date/
 description keys — a site's JSON can embed more than one dict-list shape,
 e.g. related posts alongside the full index). If that also finds nothing,
-it falls back to `scrape_index_public_blog_json`, which fetches a
+it falls back to `scrape_index_anchors_relaxed` —
+e.g. themittenmac.com/blog, whose index lives at `/blog` but every article
+lives under the sibling path `/blogs/<slug>`, so no link on the index page
+is ever nested under the index's own path. This strategy walks the same
+`<a href>` tags without requiring path nesting, but to avoid mistaking
+scattered nav/footer links (on sites that render full navigation in raw
+HTML) for articles, it groups same-host candidate links by their first
+path segment and keeps only the single largest group, and only if that
+group has at least `MIN_RELAXED_GROUP_SIZE` members. If that also finds
+nothing, it falls back to `scrape_index_public_blog_json`, which fetches a
 conventional same-host `/bin/blog/blog-index.json` (`PUBLIC_BLOG_INDEX_PATH`)
 — a *different URL* from the blog's HTML page entirely, unlike the other
-two strategies which both parse the one page already fetched for `soup`.
+strategies which all parse the one page already fetched for `soup`.
 
 Each strategy is deliberately generic (keyed off shape-matching — presence
-of `__NEXT_DATA__`, or a JSON list of dicts with title/url/date-ish keys —
-not any site-specific string), since more than one "crap blog" can share
-the same rendering/CMS pattern. If you add a fourth strategy for some other
-pattern, follow the same shape: a function returning `list[dict[str, str]]`
+of `__NEXT_DATA__`, a JSON list of dicts with title/url/date-ish keys, or
+(for `scrape_index_anchors_relaxed`) a large-enough group of same-host
+links sharing a first path segment — not any site-specific string), since
+more than one "crap blog" can share the same rendering/CMS/site-structure
+pattern. If you add another strategy for some other pattern, follow the
+same shape: a function returning `list[dict[str, str]]`
 with `{url, title, date_str}` (optionally `description`), tried only when
 the earlier strategies come up empty, not merged with them. Also add its
 name as an `INDEX_STRATEGY_*` constant and teach `scrape_index`'s ordering

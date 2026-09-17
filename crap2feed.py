@@ -699,8 +699,87 @@ def scrape_index_anchors(
     return articles
 
 
+MIN_RELAXED_GROUP_SIZE = 3
+
+
+def scrape_index_anchors_relaxed(
+    blog_url: str, soup: BeautifulSoup
+) -> list[dict[str, str]]:
+    """Fallback anchor scrape for blogs whose article links aren't nested under the index page's own path.
+
+    scrape_index_anchors requires article links to live under the index
+    page's own path (e.g. index at /blog, articles at /blog/<slug>). Some
+    blogs instead publish the index at one path and every article under a
+    *different* one (e.g. index at /blog, articles at /blogs/<slug>) -- a
+    plain sibling-directory split, not any particular CMS's doing. Since
+    that strategy already found nothing, this pass drops the path-nesting
+    requirement, but to avoid mistaking scattered nav/footer links (on
+    sites that render full navigation in raw HTML) for articles, it groups
+    same-host candidate links by their first path segment and keeps only
+    the single largest group -- and only if that group is big enough to
+    look like a real post index rather than a couple of stray links.
+    """
+    parsed = urlparse(blog_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    blog_netloc = parsed.netloc
+    index_path = parsed.path.rstrip("/")
+
+    candidates: dict[str, dict[str, str]] = {}
+    groups: dict[str, list[str]] = {}
+
+    for a in soup.find_all("a", href=True):
+        href = str(a["href"]).split("?")[0].split("#")[0]
+
+        if href.startswith("http"):
+            full_url = href
+        elif href.startswith("/"):
+            full_url = base + href
+        else:
+            full_url = urljoin(blog_url, href)
+
+        # Same same-host/scheme restriction as scrape_index_anchors -- this
+        # is still untrusted, remote content.
+        full_parsed = urlparse(full_url)
+        if full_parsed.scheme not in ("http", "https"):
+            continue
+        if full_parsed.netloc != blog_netloc:
+            continue
+
+        link_path = full_parsed.path.rstrip("/")
+        if not link_path or link_path == index_path:
+            continue
+
+        segments = link_path.strip("/").split("/")
+        if len(segments[-1]) < MIN_SLUG_LENGTH:
+            continue
+
+        if full_url in candidates:
+            continue
+
+        link_text = a.get_text(" ", strip=True)
+        title = link_text if len(link_text) > MIN_LINK_TEXT_LENGTH else ""
+        date_str = find_date_near(a)
+
+        candidates[full_url] = {
+            "url": full_url,
+            "title": title,
+            "date_str": date_str,
+        }
+        groups.setdefault(segments[0], []).append(full_url)
+
+    if not groups:
+        return []
+
+    best_urls = max(groups.values(), key=len)
+    if len(best_urls) < MIN_RELAXED_GROUP_SIZE:
+        return []
+
+    return [candidates[u] for u in best_urls]
+
+
 INDEX_STRATEGY_ANCHORS = "anchors"
 INDEX_STRATEGY_NEXTDATA = "nextdata"
+INDEX_STRATEGY_ANCHORS_RELAXED = "anchors_relaxed"
 INDEX_STRATEGY_PUBLIC_JSON = "public_json"
 
 
@@ -712,6 +791,8 @@ def _try_html_index_strategy(
         return list(scrape_index_anchors(blog_url, soup).values())
     if name == INDEX_STRATEGY_NEXTDATA:
         return scrape_index_nextdata(blog_url, soup)
+    if name == INDEX_STRATEGY_ANCHORS_RELAXED:
+        return scrape_index_anchors_relaxed(blog_url, soup)
     return []
 
 
@@ -749,7 +830,11 @@ def scrape_index(
             log.error("Failed to fetch index %s: %s", blog_url, e)
             return [], used_strategy
 
-        html_strategies = [INDEX_STRATEGY_ANCHORS, INDEX_STRATEGY_NEXTDATA]
+        html_strategies = [
+            INDEX_STRATEGY_ANCHORS,
+            INDEX_STRATEGY_NEXTDATA,
+            INDEX_STRATEGY_ANCHORS_RELAXED,
+        ]
         if known_strategy in html_strategies:
             html_strategies.remove(known_strategy)
             html_strategies.insert(0, known_strategy)

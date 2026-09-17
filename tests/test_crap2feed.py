@@ -18,6 +18,7 @@ from crap2feed import (
     public_blog_index_items_to_articles,
     score_nextdata_post_list,
     scrape_index_anchors,
+    scrape_index_anchors_relaxed,
     to_rfc3339,
     xml_escape,
 )
@@ -226,6 +227,67 @@ class TestScrapeIndexAnchors:
         html = '<html><body><a href="/blog/2026/01/some-article">Some article</a></body></html>'
         soup = BeautifulSoup(html, "html.parser")
         assert scrape_index_anchors("https://example.com/blog", soup) == {}
+
+
+class TestScrapeIndexAnchorsRelaxed:
+    """Tests for scrape_index_anchors_relaxed()."""
+
+    def test_finds_articles_under_a_sibling_path(self) -> None:
+        """Articles living under a path other than the index's own are grouped and kept."""
+        html = """
+        <html><body>
+          <a href="/blogs/a-real-article-slug">A real article slug</a>
+          <a href="/blogs/another-real-slug">Another real slug</a>
+          <a href="/blogs/a-third-real-slug">A third real slug</a>
+          <a href="/about">About</a>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        articles = scrape_index_anchors_relaxed("https://example.com/blog", soup)
+        assert {a["url"] for a in articles} == {
+            "https://example.com/blogs/a-real-article-slug",
+            "https://example.com/blogs/another-real-slug",
+            "https://example.com/blogs/a-third-real-slug",
+        }
+
+    def test_ignores_off_host_links(self) -> None:
+        """Links to a different host are never candidates, even inside the winning group."""
+        html = """
+        <html><body>
+          <a href="/blogs/a-real-article-slug">A real article slug</a>
+          <a href="/blogs/another-real-slug">Another real slug</a>
+          <a href="/blogs/a-third-real-slug">A third real slug</a>
+          <a href="https://evil.example/blogs/off-host-slug">Off host</a>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        articles = scrape_index_anchors_relaxed("https://example.com/blog", soup)
+        assert all(a["url"].startswith("https://example.com/") for a in articles)
+
+    def test_requires_a_minimum_group_size(self) -> None:
+        """A couple of stray same-segment links isn't enough to look like a post index."""
+        html = """
+        <html><body>
+          <a href="/other/a-real-article-slug">A real article slug</a>
+          <a href="/other/another-real-slug">Another real slug</a>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        assert scrape_index_anchors_relaxed("https://example.com/blog", soup) == []
+
+    def test_ignores_the_index_page_itself(self) -> None:
+        """A self-link back to the index page is never a candidate."""
+        html = """
+        <html><body>
+          <a href="/blog">Blog</a>
+          <a href="/blogs/a-real-article-slug">A real article slug</a>
+          <a href="/blogs/another-real-slug">Another real slug</a>
+          <a href="/blogs/a-third-real-slug">A third real slug</a>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        articles = scrape_index_anchors_relaxed("https://example.com/blog", soup)
+        assert "https://example.com/blog" not in {a["url"] for a in articles}
 
 
 class TestPublicBlogIndexItemsToArticles:

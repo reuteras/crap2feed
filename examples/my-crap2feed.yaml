@@ -34,6 +34,10 @@ feeds:
     url: https://www.lumen.com/blog-and-news/en-us/black-lotus-labs
     output: black-lotus.xml
 
+  - name: chompie at the bits
+    url: https://chomp.ie/Blog+Posts/
+    output: chompie.xml
+
   - name: Crowdstrike
     url: https://www.crowdstrike.com/en-us/blog/
     output: clownstrike.xml

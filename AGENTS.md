@@ -130,6 +130,26 @@ conventional same-host `/bin/blog/blog-index.json` (`PUBLIC_BLOG_INDEX_PATH`)
 — a *different URL* from the blog's HTML page entirely, unlike the other
 strategies which all parse the one page already fetched for `soup`.
 
+`scrape_index_obsidian_publish` (`INDEX_STRATEGY_OBSIDIAN`, tried after
+`anchors_relaxed`, before `public_json`) handles Obsidian Publish sites —
+e.g. chomp.ie/Blog+Posts/ — whose HTML is a bare app shell with no post
+links at all. It reads `window.siteInfo` (`uid`, content `host`,
+`customurl`) from that shell, fetches the JSON note listing at
+`https://<host>/cache/<uid>`, and keeps the `.md` notes under the index
+URL's folder (all notes if the index is the site root). Article URLs are
+rebuilt on the blog's own host the way Publish does it (spaces → `+`, rest
+percent-encoded, `.md` dropped, under the `customurl` path prefix or the
+`publish.obsidian.md/<site>/` segment — see `obsidian_site_prefix`). The
+listing has no dates, and the article pages are the same app shell (title
+`"<note> - <site name>"`, no description), so each article also carries a
+`markdown_url` (`https://<host>/access/<uid>/<path>.md`) and
+`fetch_article_metadata` reads the raw markdown via `parse_markdown_metadata`
+instead of the HTML: frontmatter `title`/`description`/`date`, else a date
+on an early line mentioning "publish"/"date", and the first prose paragraph.
+Notes with no date anywhere (common — `Last-Modified` on `/access/` is the
+whole site's last republish, so it's deliberately not used) get the current
+time like any other undated article.
+
 Each strategy is deliberately generic (keyed off shape-matching — presence
 of `__NEXT_DATA__`, a JSON list of dicts with title/url/date-ish keys, or
 (for `scrape_index_anchors_relaxed`) a large-enough group of same-host
@@ -187,6 +207,14 @@ without understanding why they're there:
   article. `scrape_index_nextdata`/`nextdata_item_to_article` apply the
   same same-host/same-scheme check to URLs built from `__NEXT_DATA__`
   JSON — that JSON is just as untrusted as the HTML it's embedded in.
+- The one deliberate cross-host exception is Obsidian Publish: the note
+  listing and markdown live on Obsidian's content host, not the blog's.
+  `parse_obsidian_siteinfo` only accepts a `host` that fully matches
+  `OBSIDIAN_HOST_RE` (`publish-N.obsidian.md`) and a 32-hex-char `uid`, so
+  a hostile index page can at most point crap2feed at Obsidian's own
+  servers, never at an arbitrary/internal host. Article URLs are still
+  built on the blog's own host. Don't loosen that regex (e.g. to any
+  `*.obsidian.md` or to whatever `host` the page names).
 - `fetch()` calls `SESSION.get(..., allow_redirects=False)` and resolves
   redirects itself, checking the `Location` header's host __before__
   issuing the next request. This was originally written with

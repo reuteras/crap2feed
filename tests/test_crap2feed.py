@@ -13,12 +13,16 @@ from crap2feed import (
     build_atom,
     find_nextdata_post_lists,
     nextdata_item_to_article,
+    obsidian_cache_to_articles,
     output_filename,
     parse_date,
+    parse_markdown_metadata,
+    parse_obsidian_siteinfo,
     public_blog_index_items_to_articles,
     score_nextdata_post_list,
     scrape_index_anchors,
     scrape_index_anchors_relaxed,
+    title_from_url,
     to_rfc3339,
     xml_escape,
 )
@@ -356,6 +360,142 @@ class TestPublicBlogIndexItemsToArticles:
                 "date_str": "August 24, 2026",
             }
         ]
+
+
+UID = "7dd65db78f0b0c2838d11f774a01b76c"
+SITEINFO = {"uid": UID, "host": "publish-01.obsidian.md", "customurl": "", "slug": ""}
+
+
+def _siteinfo_soup(info: str) -> BeautifulSoup:
+    """Wrap a siteInfo JSON literal in an Obsidian Publish-style app shell."""
+    return BeautifulSoup(
+        f"<html><head><script>window.siteInfo={info};\n(function(){{}})();</script>"
+        "</head><body></body></html>",
+        "html.parser",
+    )
+
+
+class TestParseObsidianSiteinfo:
+    """Tests for parse_obsidian_siteinfo()."""
+
+    def test_extracts_uid_and_host(self) -> None:
+        """A well-formed siteInfo blob yields its uid, host and custom URL."""
+        soup = _siteinfo_soup(
+            f'{{"uid":"{UID}","host":"publish-01.obsidian.md","slug":null,'
+            '"customurl":"chomp.ie"}'
+        )
+        assert parse_obsidian_siteinfo(soup) == {
+            "uid": UID,
+            "host": "publish-01.obsidian.md",
+            "customurl": "chomp.ie",
+            "slug": "",
+        }
+
+    def test_rejects_non_obsidian_host(self) -> None:
+        """An untrusted page can't steer fetches to an arbitrary host."""
+        for host in ("169.254.169.254", "publish-01.obsidian.md.evil.example"):
+            soup = _siteinfo_soup(f'{{"uid":"{UID}","host":"{host}"}}')
+            assert parse_obsidian_siteinfo(soup) == {}
+
+    def test_rejects_malformed_uid_and_missing_blob(self) -> None:
+        """Bad uids and pages without siteInfo produce nothing."""
+        soup = _siteinfo_soup('{"uid":"../x","host":"publish-01.obsidian.md"}')
+        assert parse_obsidian_siteinfo(soup) == {}
+        assert parse_obsidian_siteinfo(BeautifulSoup("<p>hi</p>", "html.parser")) == {}
+
+
+class TestObsidianCacheToArticles:
+    """Tests for obsidian_cache_to_articles()."""
+
+    def test_keeps_notes_in_index_folder_with_encoded_urls(self) -> None:
+        """Only .md notes under the index folder are kept, with Publish-style URLs."""
+        data = {
+            "Home.md": {},
+            "favicon.ico": None,
+            "Blog Posts/img/shot.png": None,
+            "Blog Posts/Patch Tuesday -> Pwning (afd.sys).md": {},
+            "Blog Posts/Older.md": {"frontmatter": {"date": "2021-07-29"}},
+        }
+        articles = obsidian_cache_to_articles(
+            "https://chomp.ie/Blog+Posts/", SITEINFO, data
+        )
+        assert articles == [
+            {
+                "url": "https://chomp.ie/Blog+Posts/Patch+Tuesday+-%3E+Pwning+%28afd.sys%29",
+                "title": "Patch Tuesday -> Pwning (afd.sys)",
+                "date_str": "",
+                "markdown_url": f"https://publish-01.obsidian.md/access/{UID}/"
+                "Blog%20Posts/Patch%20Tuesday%20-%3E%20Pwning%20%28afd.sys%29.md",
+            },
+            {
+                "url": "https://chomp.ie/Blog+Posts/Older",
+                "title": "Older",
+                "date_str": "2021-07-29",
+                "markdown_url": f"https://publish-01.obsidian.md/access/{UID}/"
+                "Blog%20Posts/Older.md",
+            },
+        ]
+
+    def test_custom_url_with_path_prefix(self) -> None:
+        """A site mounted below a path on its custom domain keeps that prefix."""
+        info = {**SITEINFO, "customurl": "obsidian.md/help"}
+        articles = obsidian_cache_to_articles(
+            "https://obsidian.md/help/Publish/", info, {"Publish/Setup.md": {}}
+        )
+        assert [a["url"] for a in articles] == [
+            "https://obsidian.md/help/Publish/Setup"
+        ]
+
+    def test_rejects_non_dict_payload(self) -> None:
+        """Unexpected JSON shapes produce no articles."""
+        assert obsidian_cache_to_articles("https://chomp.ie/", SITEINFO, []) == []
+
+
+class TestParseMarkdownMetadata:
+    """Tests for parse_markdown_metadata()."""
+
+    def test_date_line_and_first_paragraph(self) -> None:
+        """A 'Date Published' line gives the date; the first prose block the description."""
+        md = (
+            "<p><sub><i>Original Date Published: July 29, 2021</i></sub></p>\n\n"
+            "![[banner.png]]\n\n# Heading\n\n"
+            "This post covers **io_uring** and [an exploit](https://example.com) "
+            "for local privilege escalation, written up by @malware_owl in detail.\n"
+        )
+        assert parse_markdown_metadata(md) == {
+            "title": "",
+            "description": "This post covers io_uring and an exploit for local "
+            "privilege escalation, written up by @malware_owl in detail.",
+            "date": "July 29, 2021",
+        }
+
+    def test_frontmatter_wins(self) -> None:
+        """YAML frontmatter title/description/date are used when present."""
+        md = "---\ntitle: A Post\ndescription: Short.\ndate: 2024-05-01\n---\nBody text.\n"
+        assert parse_markdown_metadata(md) == {
+            "title": "A Post",
+            "description": "Short.",
+            "date": "2024-05-01",
+        }
+
+    def test_short_note_falls_back_to_first_block(self) -> None:
+        """A short link-out note still gets a description and no invented date."""
+        meta = parse_markdown_metadata("Blog post here: https://example.com/post\n")
+        assert meta["description"] == "Blog post here: https://example.com/post"
+        assert meta["date"] == ""
+
+
+class TestTitleFromUrl:
+    """Tests for title_from_url()."""
+
+    def test_decodes_pluses_and_percent_escapes(self) -> None:
+        """Obsidian Publish-style slugs turn back into the note's filename."""
+        assert (
+            title_from_url(
+                "https://chomp.ie/Blog+Posts/Patch+Tuesday+-%3E+Pwning+%28afd.sys%29"
+            )
+            == "Patch Tuesday -> Pwning (afd.sys)"
+        )
 
 
 class TestBuildAtom:

@@ -43,7 +43,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as installed_version
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, unquote_plus, urljoin, urlparse
 
 try:
     import requests
@@ -633,6 +633,224 @@ def scrape_index_public_blog_json(blog_url: str) -> list[dict[str, str]]:
     return public_blog_index_items_to_articles(blog_url, data)
 
 
+# ── Obsidian Publish fallback ───────────────────────────────────────────────
+#
+# Obsidian Publish sites (e.g. chomp.ie) serve a bare app shell: no post
+# links, no embedded post list. The shell does carry a `window.siteInfo`
+# blob naming the site's uid and the Obsidian content host, which serves a
+# JSON listing of every published note (/cache/<uid>) and each note's raw
+# markdown (/access/<uid>/<path>.md). That content host is a different host
+# from the blog, so it's only accepted if it matches OBSIDIAN_HOST_RE — a
+# hostile index page can then at most point us at Obsidian's own servers.
+
+OBSIDIAN_SITEINFO_RE = re.compile(r"window\.siteInfo\s*=\s*(\{.*?\})\s*;", re.S)
+OBSIDIAN_HOST_RE = re.compile(r"publish-\d{1,3}\.obsidian\.md")
+OBSIDIAN_UID_RE = re.compile(r"[0-9a-f]{32}")
+OBSIDIAN_SHARED_HOST = "publish.obsidian.md"
+OBSIDIAN_DATE_KEYS = ("date", "published", "pubdate", "created")
+MARKDOWN_DATE_SCAN_LINES = 20
+MARKDOWN_DATE_LINE_RE = re.compile(r"publish|date", re.I)
+MARKDOWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.S)
+MARKDOWN_SKIP_BLOCK_RE = re.compile(r"\s*(?:#|!\[|<|```|\||---|>)")
+MARKDOWN_WIKILINK_RE = re.compile(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]")
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# `_` only at word edges, so identifiers like io_uring keep their underscores.
+MARKDOWN_EMPHASIS_RE = re.compile(r"[*`]+|(?<!\w)_+|_+(?!\w)")
+
+
+def parse_obsidian_siteinfo(soup: BeautifulSoup) -> dict[str, str]:
+    """Return {uid, host, customurl, slug} from an Obsidian Publish page, if valid.
+
+    Returns {} unless the uid and content host have the expected shape; the
+    host check is what keeps an untrusted page from steering later fetches
+    anywhere other than Obsidian's own content servers.
+    """
+    for script in soup.find_all("script"):
+        m = OBSIDIAN_SITEINFO_RE.search(script.get_text())
+        if not m:
+            continue
+        try:
+            info = json.loads(m.group(1))
+        except ValueError:
+            return {}
+        if not isinstance(info, dict):
+            return {}
+        uid, host = info.get("uid"), info.get("host")
+        if not (
+            isinstance(uid, str)
+            and isinstance(host, str)
+            and OBSIDIAN_UID_RE.fullmatch(uid)
+            and OBSIDIAN_HOST_RE.fullmatch(host)
+        ):
+            log.warning("Ignoring Obsidian siteInfo with unexpected uid/host")
+            return {}
+        return {
+            "uid": uid,
+            "host": host,
+            "customurl": str(info.get("customurl") or ""),
+            "slug": str(info.get("slug") or ""),
+        }
+    return {}
+
+
+def obsidian_site_prefix(blog_url: str, siteinfo: dict[str, str]) -> str:
+    """Return the URL path prefix (no slashes) under which the site's notes live.
+
+    Custom domains may mount a site below a path (customurl
+    "obsidian.md/help"); sites on the shared publish.obsidian.md host live
+    under their first path segment.
+    """
+    parsed = urlparse(blog_url)
+    custom = urlparse("//" + siteinfo.get("customurl", ""))
+    if custom.netloc and custom.netloc == parsed.netloc:
+        return custom.path.strip("/")
+    if parsed.netloc == OBSIDIAN_SHARED_HOST:
+        return siteinfo.get("slug") or parsed.path.strip("/").split("/", 1)[0]
+    return ""
+
+
+def obsidian_cache_to_articles(
+    blog_url: str, siteinfo: dict[str, str], data: Any
+) -> list[dict[str, str]]:
+    """Convert an Obsidian Publish /cache/<uid> listing into article dicts.
+
+    Keeps markdown notes inside the folder the index URL points at (every
+    note when the index is the site root). Each article also carries a
+    `markdown_url` for fetching the note's raw markdown.
+    """
+    if not isinstance(data, dict):
+        return []
+    parsed = urlparse(blog_url)
+    prefix = obsidian_site_prefix(blog_url, siteinfo)
+    root = f"{parsed.scheme}://{parsed.netloc}/" + (f"{prefix}/" if prefix else "")
+    folder = unquote_plus(parsed.path).strip("/")
+    if prefix and (folder == prefix or folder.startswith(prefix + "/")):
+        folder = folder[len(prefix) :].strip("/")
+    access_base = f"https://{siteinfo['host']}/access/{siteinfo['uid']}/"
+
+    articles: list[dict[str, str]] = []
+    for path, meta in data.items():
+        if not isinstance(path, str) or not path.endswith(".md"):
+            continue
+        if folder and not path.startswith(folder + "/"):
+            continue
+        note = path.removesuffix(".md")
+        article = {
+            "url": root + quote(note.replace(" ", "+"), safe="/+"),
+            "title": note.rsplit("/", 1)[-1].strip(),
+            "date_str": "",
+            "markdown_url": access_base + quote(path),
+        }
+        frontmatter = meta.get("frontmatter") if isinstance(meta, dict) else None
+        if isinstance(frontmatter, dict):
+            for key in OBSIDIAN_DATE_KEYS:
+                if frontmatter.get(key):
+                    article["date_str"] = str(frontmatter[key])
+                    break
+        if article["title"]:
+            articles.append(article)
+    return articles
+
+
+def scrape_index_obsidian_publish(
+    blog_url: str, soup: BeautifulSoup
+) -> list[dict[str, str]]:
+    """List notes of an Obsidian Publish site from its content-host cache JSON."""
+    siteinfo = parse_obsidian_siteinfo(soup)
+    if not siteinfo:
+        return []
+    cache_url = f"https://{siteinfo['host']}/cache/{siteinfo['uid']}"
+    try:
+        data = fetch_json(cache_url)
+    except Exception as e:
+        log.info("No Obsidian Publish cache at %s: %s", cache_url, e)
+        return []
+    return obsidian_cache_to_articles(blog_url, siteinfo, data)
+
+
+def _markdown_plain_text(block: str) -> str:
+    """Strip common markdown/wikilink syntax from a paragraph, keeping its text."""
+    text = MARKDOWN_WIKILINK_RE.sub(r"\1", block)
+    text = MARKDOWN_LINK_RE.sub(r"\1", text)
+    text = MARKDOWN_EMPHASIS_RE.sub("", text)
+    return " ".join(text.split())
+
+
+def parse_markdown_metadata(markdown: str) -> dict[str, str]:
+    """Extract {title, description, date} from a note's raw markdown.
+
+    The date comes from YAML frontmatter if present, else from a date on an
+    early line mentioning "publish"/"date" (e.g. "Original Date Published:
+    July 29, 2021"). The description is the first prose paragraph.
+    """
+    meta = {"title": "", "description": "", "date": ""}
+    body = markdown
+    fm = MARKDOWN_FRONTMATTER_RE.match(markdown)
+    if fm:
+        body = markdown[fm.end() :]
+        try:
+            front = yaml.safe_load(fm.group(1))
+        except yaml.YAMLError:
+            front = None
+        if isinstance(front, dict):
+            meta["title"] = str(front.get("title") or "")
+            meta["description"] = str(front.get("description") or "")
+            for key in OBSIDIAN_DATE_KEYS:
+                if front.get(key):
+                    meta["date"] = str(front[key])
+                    break
+
+    if not meta["date"]:
+        for line in body.splitlines()[:MARKDOWN_DATE_SCAN_LINES]:
+            m = DATE_RE.search(line)
+            if m and MARKDOWN_DATE_LINE_RE.search(line):
+                meta["date"] = m.group(0)
+                break
+
+    if not meta["description"]:
+        fallback = ""
+        for block in re.split(r"\n\s*\n", body):
+            if not block.strip() or MARKDOWN_SKIP_BLOCK_RE.match(block):
+                continue
+            text = _markdown_plain_text(block)
+            if len(text) > MIN_PARAGRAPH_LENGTH:
+                meta["description"] = text[:PARAGRAPH_EXCERPT_LENGTH]
+                break
+            fallback = fallback or text
+        meta["description"] = meta["description"] or fallback[:PARAGRAPH_EXCERPT_LENGTH]
+    return meta
+
+
+def get_markdown_metadata(url: str) -> dict[str, str]:
+    """Fetch a raw markdown note (e.g. Obsidian Publish) and extract its metadata."""
+    try:
+        markdown = _fetch_direct_bytes(url).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning("  Could not fetch %s: %s", url, e)
+        return {}
+    return parse_markdown_metadata(markdown)
+
+
+def fetch_article_metadata(article: dict[str, str]) -> dict[str, str]:
+    """Fetch metadata for an index entry, from its raw markdown when it has one.
+
+    Obsidian Publish article pages are the same bare app shell as the index
+    (title "<note> - <site name>", no description), so notes found via
+    scrape_index_obsidian_publish() are read from their markdown instead.
+    """
+    if article.get("markdown_url"):
+        meta = get_markdown_metadata(article["markdown_url"])
+        if meta and not meta.get("title"):
+            meta["title"] = title_from_url(article["url"])
+        return meta
+    return get_article_metadata(article["url"])
+
+
+def title_from_url(url: str) -> str:
+    """Derive a title from a URL's last path segment ("A+Post%3F" -> "A Post?")."""
+    return unquote_plus(urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]).strip()
+
+
 def scrape_index_anchors(
     blog_url: str, soup: BeautifulSoup
 ) -> dict[str, dict[str, str]]:
@@ -781,6 +999,7 @@ INDEX_STRATEGY_ANCHORS = "anchors"
 INDEX_STRATEGY_NEXTDATA = "nextdata"
 INDEX_STRATEGY_ANCHORS_RELAXED = "anchors_relaxed"
 INDEX_STRATEGY_PUBLIC_JSON = "public_json"
+INDEX_STRATEGY_OBSIDIAN = "obsidian_publish"
 
 
 def _try_html_index_strategy(
@@ -793,6 +1012,8 @@ def _try_html_index_strategy(
         return scrape_index_nextdata(blog_url, soup)
     if name == INDEX_STRATEGY_ANCHORS_RELAXED:
         return scrape_index_anchors_relaxed(blog_url, soup)
+    if name == INDEX_STRATEGY_OBSIDIAN:
+        return scrape_index_obsidian_publish(blog_url, soup)
     return []
 
 
@@ -834,6 +1055,7 @@ def scrape_index(
             INDEX_STRATEGY_ANCHORS,
             INDEX_STRATEGY_NEXTDATA,
             INDEX_STRATEGY_ANCHORS_RELAXED,
+            INDEX_STRATEGY_OBSIDIAN,
         ]
         if known_strategy in html_strategies:
             html_strategies.remove(known_strategy)
@@ -983,7 +1205,7 @@ def generate_feed(
             continue
 
         log.info("  [%d/%d] %s", i + 1, len(articles), a["url"].split("/")[-1])
-        meta = get_article_metadata(a["url"])
+        meta = fetch_article_metadata(a)
         # Only overwrite if better data was found
         if meta.get("title") and len(meta["title"]) > len(a.get("title", "")):
             a["title"] = meta["title"]
@@ -1261,7 +1483,7 @@ def check_url(url: str) -> None:
             print(f"   date (from index): {a['date_str']}")
 
     print("\nFetching the first article to check metadata extraction...")
-    meta = get_article_metadata(articles[0]["url"])
+    meta = fetch_article_metadata(articles[0])
     if not meta.get("title") and not meta.get("description"):
         log.warning("Could not extract title/description from the article page.")
     else:

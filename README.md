@@ -18,6 +18,14 @@ that embedded JSON for a list that looks like a set of blog posts, so these
 "different types of crap blogs" are supported too, not just the plain
 link-list ones.
 
+Blogs published with [Obsidian Publish](https://obsidian.md/publish) (e.g.
+`https://chomp.ie/Blog+Posts/`) are supported too: point the feed `url` at
+the folder holding the posts, and crap2feed lists that folder's notes from
+Obsidian's note index and reads each post's markdown for its date and
+description. Posts that don't state a date in their frontmatter or near the
+top of the text get the current time as their date, like any other
+undated article.
+
 ## Requirements
 
 - Python 3.14+
@@ -169,8 +177,8 @@ a container" below.
 - The index page can be scraped several different ways (plain `<a>` links
   nested under the index's own path, the same links without that nesting
   requirement for blogs whose articles live under a different path than
-  their index, an embedded `__NEXT_DATA__` post list, a site's public JSON
-  blog index), tried in order until one works. Once a feed's working strategy is known,
+  their index, an embedded `__NEXT_DATA__` post list, an Obsidian Publish
+  note index, a site's public JSON blog index), tried in order until one works. Once a feed's working strategy is known,
   it's remembered in the cache and tried first on every later run instead
   of re-probing every strategy — so the extra request(s) needed to figure
   out how a new blog type works are only ever spent once. The same applies

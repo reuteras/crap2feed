@@ -75,7 +75,7 @@ class TestToRfc3339:
         """A None datetime is formatted as roughly the current time."""
         result = to_rfc3339(None)
         assert result.endswith("Z")
-        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(result)
         assert abs((datetime.now(UTC) - parsed).total_seconds()) < NOW_TOLERANCE_SECONDS
 
     def test_utc_datetime_uses_z_suffix(self) -> None:

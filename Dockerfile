@@ -24,11 +24,13 @@ COPY --chown=crap2feed:crap2feed crap2feed.py ./
 
 EXPOSE 8002
 VOLUME ["/data"]
-USER crap2feed
+# Numeric uid:gid (hadolint DL3066) so it resolves even without /etc/passwd
+# lookups on the host/runtime side; same ids as the user created above.
+USER 1000:1000
 
 # --serve has no fixed "/" route, so this just checks the port is listening.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD python3 -c "import socket; socket.create_connection(('127.0.0.1', 8002), 3).close()" || exit 1
+    CMD ["python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8002), 3).close()"]
 
 ENTRYPOINT ["/app/.venv/bin/crap2feed"]
 CMD ["--config", "/data/crap2feed.yaml", "--serve"]

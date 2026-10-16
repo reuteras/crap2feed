@@ -63,14 +63,15 @@ uv run pytest
 - Avoid magic numbers in comparisons (`PLR2004`) — pull them into a named
   `UPPER_CASE` constant near the function that uses them, as done for
   `MIN_SLUG_LENGTH`, `MIN_LINK_TEXT_LENGTH`, etc.
-- `lint.select` includes `EXE`, `DTZ`, `FURB`, and `BLE` because
+- `lint.select` includes `EXE`, `DTZ`, `FURB`, `BLE`, and `TRY004` because
   super-linter v9's bundled ruff enforces them in CI; keeping them in
   `pyproject.toml` makes the pinned local ruff fail the same way. For
   `BLE001`, catch `FETCH_ERRORS` (`requests.RequestException`,
-  `ValueError`, `ParserRejectedMarkup`) around fetches of remote content
+  `ValueError`, `TypeError`, `ParserRejectedMarkup`) around fetches of remote content
   rather than a bare `Exception` — and make sure anything that parses an
   untrusted response raises one of those (see `fetch_via_flaresolverr`'s
-  shape checks) instead of e.g. `AttributeError`. `parse_date` tries the
+  shape checks, which raise `TypeError` per `TRY004`) instead of e.g.
+  `AttributeError`. `parse_date` tries the
   one `%z` format inline before the naive `DATE_FORMATS` so every
   `strptime` result is timezone-aware (`DTZ007`).
 - `bs4`, `requests`, and `yaml` are covered by `ignore_missing_imports`

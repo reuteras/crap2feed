@@ -230,10 +230,16 @@ MAX_REDIRECTS = 5
 
 # Everything a fetch of untrusted remote content is expected to raise:
 # network/HTTP errors, our own ValueErrors (cross-host redirect, size cap,
-# FlareSolverr failure), JSON/Unicode decode errors (both ValueError
-# subclasses), and html.parser rejecting hostile markup. Catch this rather
-# than a bare Exception so genuine bugs still surface.
-FETCH_ERRORS = (requests.RequestException, ValueError, ParserRejectedMarkup)
+# FlareSolverr failure), TypeErrors from FlareSolverr JSON of the wrong
+# shape, JSON/Unicode decode errors (both ValueError subclasses), and
+# html.parser rejecting hostile markup. Catch this rather than a bare
+# Exception so genuine bugs still surface.
+FETCH_ERRORS = (
+    requests.RequestException,
+    ValueError,
+    TypeError,
+    ParserRejectedMarkup,
+)
 
 
 def _fetch_direct_bytes(url: str) -> bytes:
@@ -322,13 +328,13 @@ def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
             )
     data = json.loads(content)
     if not isinstance(data, dict):
-        raise ValueError(f"FlareSolverr returned a non-object response for {url}")
+        raise TypeError(f"FlareSolverr returned a non-object response for {url}")
     if data.get("status") != "ok":
         raise ValueError(f"FlareSolverr could not fetch {url}: {data.get('message')}")
     solution = data.get("solution")
     html = solution.get("response", "") if isinstance(solution, dict) else ""
     if not isinstance(html, str):
-        raise ValueError(f"FlareSolverr returned a non-string page for {url}")
+        raise TypeError(f"FlareSolverr returned a non-string page for {url}")
     return BeautifulSoup(html, "html.parser")
 
 

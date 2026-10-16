@@ -59,6 +59,7 @@ lint.select = [
     "DTZ", # flake8-datetimez
     "FURB", # refurb
     "BLE", # flake8-blind-except
+    "TRY004", # raise TypeError after a failed isinstance check
 ]
 lint.ignore = [
     "E501", # line too long, handled by black

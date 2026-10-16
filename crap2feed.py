@@ -49,6 +49,7 @@ try:
     import requests
     import yaml
     from bs4 import BeautifulSoup, Tag
+    from bs4.builder import ParserRejectedMarkup
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
 except ImportError:
@@ -131,8 +132,9 @@ HTTP_FORBIDDEN = 403
 
 # ── Date parsing ───────────────────────────────────────────────────────────────
 
+# Naive formats only (assumed UTC); the one offset-aware format,
+# "%Y-%m-%dT%H:%M:%S%z", is tried first, inline, in parse_date().
 DATE_FORMATS = [
-    "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%dT%H:%M:%SZ",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d",
@@ -145,18 +147,22 @@ DATE_FORMATS = [
 
 
 def parse_date(s: str) -> datetime | None:
-    """Parse a date string in any of the known DATE_FORMATS."""
+    """Parse an ISO 8601 date with offset, or any of the naive DATE_FORMATS."""
     if not s:
         return None
     s = s.strip().rstrip("Z")
     # Handle timezone offsets like +00:00
     s = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", s)
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        pass
+    else:
+        # Newer Pythons let %z match an empty offset, yielding a naive result.
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     for fmt in DATE_FORMATS:
         try:
-            dt = datetime.strptime(s, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            return dt
+            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
         except ValueError:
             continue
     return None
@@ -221,6 +227,19 @@ SESSION = build_session()
 
 
 MAX_REDIRECTS = 5
+
+# Everything a fetch of untrusted remote content is expected to raise:
+# network/HTTP errors, our own ValueErrors (cross-host redirect, size cap,
+# FlareSolverr failure), TypeErrors from FlareSolverr JSON of the wrong
+# shape, JSON/Unicode decode errors (both ValueError subclasses), and
+# html.parser rejecting hostile markup. Catch this rather than a bare
+# Exception so genuine bugs still surface.
+FETCH_ERRORS = (
+    requests.RequestException,
+    ValueError,
+    TypeError,
+    ParserRejectedMarkup,
+)
 
 
 def _fetch_direct_bytes(url: str) -> bytes:
@@ -308,9 +327,14 @@ def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
                 f"FlareSolverr response for {url} exceeded {MAX_RESPONSE_BYTES} bytes"
             )
     data = json.loads(content)
+    if not isinstance(data, dict):
+        raise TypeError(f"FlareSolverr returned a non-object response for {url}")
     if data.get("status") != "ok":
         raise ValueError(f"FlareSolverr could not fetch {url}: {data.get('message')}")
-    html = data.get("solution", {}).get("response", "")
+    solution = data.get("solution")
+    html = solution.get("response", "") if isinstance(solution, dict) else ""
+    if not isinstance(html, str):
+        raise TypeError(f"FlareSolverr returned a non-string page for {url}")
     return BeautifulSoup(html, "html.parser")
 
 
@@ -389,7 +413,7 @@ def first_real_paragraph(soup: BeautifulSoup) -> str:
     """Fallback: first substantial <p> that isn't nav/footer boilerplate."""
     BOILERPLATE = re.compile(
         r"cookie|privacy|subscribe|copyright|newsletter|©|all rights reserved",
-        re.I,
+        re.IGNORECASE,
     )
     for p in soup.find_all("p"):
         text = p.get_text(" ", strip=True)
@@ -402,7 +426,7 @@ def get_article_metadata(url: str) -> dict[str, str]:
     """Fetch an article URL and return {title, description, image, date}."""
     try:
         soup = fetch(url)
-    except Exception as e:
+    except FETCH_ERRORS as e:
         log.warning("  Could not fetch %s: %s", url, e)
         return {}
 
@@ -627,7 +651,7 @@ def scrape_index_public_blog_json(blog_url: str) -> list[dict[str, str]]:
     index_url = f"{parsed.scheme}://{parsed.netloc}{PUBLIC_BLOG_INDEX_PATH}"
     try:
         data = fetch_json(index_url)
-    except Exception as e:
+    except FETCH_ERRORS as e:
         log.info("No public blog index at %s: %s", index_url, e)
         return []
     return public_blog_index_items_to_articles(blog_url, data)
@@ -643,14 +667,14 @@ def scrape_index_public_blog_json(blog_url: str) -> list[dict[str, str]]:
 # from the blog, so it's only accepted if it matches OBSIDIAN_HOST_RE — a
 # hostile index page can then at most point us at Obsidian's own servers.
 
-OBSIDIAN_SITEINFO_RE = re.compile(r"window\.siteInfo\s*=\s*(\{.*?\})\s*;", re.S)
+OBSIDIAN_SITEINFO_RE = re.compile(r"window\.siteInfo\s*=\s*(\{.*?\})\s*;", re.DOTALL)
 OBSIDIAN_HOST_RE = re.compile(r"publish-\d{1,3}\.obsidian\.md")
 OBSIDIAN_UID_RE = re.compile(r"[0-9a-f]{32}")
 OBSIDIAN_SHARED_HOST = "publish.obsidian.md"
 OBSIDIAN_DATE_KEYS = ("date", "published", "pubdate", "created")
 MARKDOWN_DATE_SCAN_LINES = 20
-MARKDOWN_DATE_LINE_RE = re.compile(r"publish|date", re.I)
-MARKDOWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.S)
+MARKDOWN_DATE_LINE_RE = re.compile(r"publish|date", re.IGNORECASE)
+MARKDOWN_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 MARKDOWN_SKIP_BLOCK_RE = re.compile(r"\s*(?:#|!\[|<|```|\||---|>)")
 MARKDOWN_WIKILINK_RE = re.compile(r"\[\[(?:[^\]|]*\|)?([^\]]*)\]\]")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
@@ -762,7 +786,7 @@ def scrape_index_obsidian_publish(
     cache_url = f"https://{siteinfo['host']}/cache/{siteinfo['uid']}"
     try:
         data = fetch_json(cache_url)
-    except Exception as e:
+    except FETCH_ERRORS as e:
         log.info("No Obsidian Publish cache at %s: %s", cache_url, e)
         return []
     return obsidian_cache_to_articles(blog_url, siteinfo, data)
@@ -825,7 +849,7 @@ def get_markdown_metadata(url: str) -> dict[str, str]:
     """Fetch a raw markdown note (e.g. Obsidian Publish) and extract its metadata."""
     try:
         markdown = _fetch_direct_bytes(url).decode("utf-8", errors="replace")
-    except Exception as e:
+    except FETCH_ERRORS as e:
         log.warning("  Could not fetch %s: %s", url, e)
         return {}
     return parse_markdown_metadata(markdown)
@@ -1047,7 +1071,7 @@ def scrape_index(
     if not article_list:
         try:
             soup = fetch(blog_url)
-        except Exception as e:
+        except FETCH_ERRORS as e:
             log.error("Failed to fetch index %s: %s", blog_url, e)
             return [], used_strategy
 

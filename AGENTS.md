@@ -63,6 +63,17 @@ uv run pytest
 - Avoid magic numbers in comparisons (`PLR2004`) — pull them into a named
   `UPPER_CASE` constant near the function that uses them, as done for
   `MIN_SLUG_LENGTH`, `MIN_LINK_TEXT_LENGTH`, etc.
+- `lint.select` includes `EXE`, `DTZ`, `FURB`, `BLE`, and `TRY004` because
+  super-linter v9's bundled ruff enforces them in CI; keeping them in
+  `pyproject.toml` makes the pinned local ruff fail the same way. For
+  `BLE001`, catch `FETCH_ERRORS` (`requests.RequestException`,
+  `ValueError`, `TypeError`, `ParserRejectedMarkup`) around fetches of remote content
+  rather than a bare `Exception` — and make sure anything that parses an
+  untrusted response raises one of those (see `fetch_via_flaresolverr`'s
+  shape checks, which raise `TypeError` per `TRY004`) instead of e.g.
+  `AttributeError`. `parse_date` tries the
+  one `%z` format inline before the naive `DATE_FORMATS` so every
+  `strptime` result is timezone-aware (`DTZ007`).
 - `bs4`, `requests`, and `yaml` are covered by `ignore_missing_imports`
   overrides in `[tool.mypy]` rather than `types-*` stub packages — keep it
   that way (see dependency policy below) rather than adding stub
@@ -93,7 +104,7 @@ deliberate choice, not a convenience:
   HTTP server is stdlib `http.server`/`threading`, and FlareSolverr's API is
   called with the already-present `requests`. Keep it that way; don't reach
   for a web framework for `--serve`.
-- `Dockerfile` pins `ghcr.io/astral-sh/uv:0.12.1` by exact tag (no
+- `Dockerfile` pins `ghcr.io/astral-sh/uv:0.12.23` by exact tag (no
   `latest`) for the `uv` binary used only in the build stage, matching the
   no-version-ranges pinning discipline used everywhere else. The runtime
   stage copies just `/app/.venv` and `crap2feed.py` out of the build stage —

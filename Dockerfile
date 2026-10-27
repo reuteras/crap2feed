@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 
 # Builder: only /app/.venv is copied out, so uv/pip never reach runtime.
 FROM python:3.15-slim AS builder

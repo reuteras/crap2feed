@@ -38,6 +38,10 @@ feeds:
     url: https://chomp.ie/Blog+Posts/
     output: chompie.xml
 
+  - name: Claroty
+    url: https://claroty.com/blog
+    output: claroty.xml
+
   - name: Crowdstrike
     url: https://www.crowdstrike.com/en-us/blog/
     output: clownstrike.xml

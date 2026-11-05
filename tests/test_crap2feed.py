@@ -220,6 +220,22 @@ class TestScrapeIndexAnchors:
             "A real article slug and title"
         )
 
+    def test_card_anchor_uses_heading_text_as_title(self) -> None:
+        """A whole card wrapped in <a> yields its heading, not category/read-time/CTA text."""
+        html = """
+        <html><body>
+          <a href="/blog/managing-knx-risks-in-retail-bms">
+            <div>Blog <span>/</span> 8 min read</div>
+            <h2>Managing KNX Risks in Retail BMS</h2>
+            <span>Read More</span>
+          </a>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        articles = scrape_index_anchors("https://example.com/blog", soup)
+        url = "https://example.com/blog/managing-knx-risks-in-retail-bms"
+        assert articles[url]["title"] == "Managing KNX Risks in Retail BMS"
+
     def test_skips_short_slugs(self) -> None:
         """Slugs shorter than MIN_SLUG_LENGTH are assumed to be category pages."""
         html = '<html><body><a href="/blog/ab">ab</a></body></html>'

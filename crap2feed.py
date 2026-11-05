@@ -468,6 +468,20 @@ def get_article_metadata(url: str) -> dict[str, str]:
 
 MIN_SLUG_LENGTH = 5
 MIN_LINK_TEXT_LENGTH = 10
+LINK_HEADING_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6")
+
+
+def anchor_title(a: Tag) -> str:
+    """Return a title for an index-page link, or "" if it has no usable text.
+
+    Many index pages wrap a whole "card" in one <a> (category, read time,
+    title, excerpt, "Read More", tags), so the anchor's full text is not a
+    title. If the anchor contains a heading element, use that heading's text;
+    otherwise fall back to the anchor's own text.
+    """
+    heading = a.find(LINK_HEADING_TAGS)
+    text = (heading or a).get_text(" ", strip=True)
+    return text if len(text) > MIN_LINK_TEXT_LENGTH else ""
 
 
 # ── __NEXT_DATA__ fallback ──────────────────────────────────────────────────
@@ -927,8 +941,7 @@ def scrape_index_anchors(
             continue
 
         # Try to get the title from the link text itself
-        link_text = a.get_text(" ", strip=True)
-        title = link_text if len(link_text) > MIN_LINK_TEXT_LENGTH else ""
+        title = anchor_title(a)
 
         date_str = find_date_near(a)
 
@@ -998,8 +1011,7 @@ def scrape_index_anchors_relaxed(
         if full_url in candidates:
             continue
 
-        link_text = a.get_text(" ", strip=True)
-        title = link_text if len(link_text) > MIN_LINK_TEXT_LENGTH else ""
+        title = anchor_title(a)
         date_str = find_date_near(a)
 
         candidates[full_url] = {

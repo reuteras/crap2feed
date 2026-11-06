@@ -20,6 +20,8 @@ strategy.
 - Dates for these posts come from the index's `publishedDate`. The article
   pages' `published-time` meta tag is the last republish time, not when the
   post was actually published.
+- Infoblox (`https://www.infoblox.com/blog`) added to
+  `examples/my-crap2feed.yaml`.
 
 ### Hall of shame
 

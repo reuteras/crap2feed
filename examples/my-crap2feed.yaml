@@ -50,6 +50,10 @@ feeds:
     url: https://www.group-ib.com/blog/
     output: group-ib.xml
 
+  - name: Infoblox
+    url: https://www.infoblox.com/blog
+    output: infoblox.xml
+
   - name: Intezer
     url: https://intezer.com/blog
     output: intezer.xml

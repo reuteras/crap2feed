@@ -1,6 +1,7 @@
 """Basic tests for the pure-logic parts of crap2feed.py.
 
-Covers date parsing/formatting, XML escaping, __NEXT_DATA__ scoring, and
+Covers date parsing/formatting, XML escaping, __NEXT_DATA__ scoring, JSON
+index conversion (public blog index, EDS sheet, Obsidian Publish), and
 anchor/Atom-feed generation. Network-touching functions (fetch, get_article_metadata)
 are out of scope here since they'd need mocked HTTP.
 """
@@ -11,6 +12,9 @@ from bs4 import BeautifulSoup
 
 from crap2feed import (
     build_atom,
+    eds_date_to_str,
+    eds_index_urls,
+    eds_sheet_to_articles,
     find_nextdata_post_lists,
     nextdata_item_to_article,
     obsidian_cache_to_articles,
@@ -545,3 +549,76 @@ class TestBuildAtom:
             "Feed", "https://example.com", [{"url": "https://example.com/a"}]
         )
         assert "<title>Untitled</title>" in xml
+
+
+EDS_EPOCH = 1793232000  # 2026-10-29T00:00:00Z
+
+
+class TestEdsSheetIndex:
+    """Tests for the AEM Edge Delivery Services sheet-index helpers."""
+
+    def test_index_urls_use_first_path_segment_then_query_index(self) -> None:
+        """A section blog checks /<section>-index.json before /query-index.json."""
+        assert eds_index_urls("https://www.infoblox.com/blog/") == [
+            "https://www.infoblox.com/blog-index.json",
+            "https://www.infoblox.com/query-index.json",
+        ]
+        assert eds_index_urls("https://example.com") == [
+            "https://example.com/query-index.json"
+        ]
+        assert eds_index_urls("ftp://example.com/blog") == []
+
+    def test_date_conversion(self) -> None:
+        """Epoch seconds (int or digit string) become ISO dates; junk is dropped."""
+        assert eds_date_to_str(EDS_EPOCH) == "2026-10-29T00:00:00+00:00"
+        assert eds_date_to_str(str(EDS_EPOCH)) == "2026-10-29T00:00:00+00:00"
+        assert eds_date_to_str("July 20, 2026") == "July 20, 2026"
+        assert eds_date_to_str(0) == ""
+        assert eds_date_to_str(True) == ""
+        assert eds_date_to_str(None) == ""
+        assert eds_date_to_str(10**20) == ""
+
+    def test_sheet_rows_become_trusted_dated_articles(self) -> None:
+        """Rows under the blog path become articles carrying the index date."""
+        data = {
+            ":type": "sheet",
+            "data": [
+                {
+                    "path": "/blog/threat-intelligence/2026/10/a-post",
+                    "title": " A post ",
+                    "description": "Summary",
+                    "publishedDate": EDS_EPOCH,
+                    "lastModified": EDS_EPOCH + 999,
+                },
+                {"path": "/blog/company/undated-post", "title": "Undated"},
+            ],
+        }
+        assert eds_sheet_to_articles("https://www.infoblox.com/blog", data) == [
+            {
+                "url": "https://www.infoblox.com/blog/threat-intelligence/2026/10/a-post",
+                "title": "A post",
+                "date_str": "2026-10-29T00:00:00+00:00",
+                "trust_index_date": "1",
+                "description": "Summary",
+            },
+            {
+                "url": "https://www.infoblox.com/blog/company/undated-post",
+                "title": "Undated",
+                "date_str": "",
+            },
+        ]
+
+    def test_rejects_bad_shapes_off_path_and_off_host_rows(self) -> None:
+        """Untrusted sheet JSON can't add pages outside the blog or off-host."""
+        url = "https://www.infoblox.com/blog"
+        assert eds_sheet_to_articles(url, []) == []
+        assert eds_sheet_to_articles(url, {"data": "nope"}) == []
+        rows = [
+            {"path": "/products/thing", "title": "Not a post"},
+            {"path": "/blog", "title": "The index itself"},
+            {"path": "/blogs/sibling", "title": "Sibling path"},
+            {"path": "//evil.example/blog/x", "title": "Protocol-relative"},
+            {"path": "/blog/no-title"},
+            "not a dict",
+        ]
+        assert eds_sheet_to_articles(url, {"data": rows}) == []

@@ -36,6 +36,7 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -671,6 +672,108 @@ def scrape_index_public_blog_json(blog_url: str) -> list[dict[str, str]]:
     return public_blog_index_items_to_articles(blog_url, data)
 
 
+# ── AEM Edge Delivery Services sheet index fallback ─────────────────────────
+#
+# Sites on Adobe Experience Manager Edge Delivery Services (e.g.
+# infoblox.com/blog) serve a block-markup shell whose post list is filled in
+# client-side from a same-host "sheet" JSON index: {"data": [{path, title,
+# ...}], ":type": "sheet"}. The index is conventionally /query-index.json or
+# a per-section /<section>-index.json. Dates are Unix epoch seconds, and are
+# the only trustworthy dates available: the article pages' published-time
+# meta tag is the last *republish* time, not the post date — so articles
+# from this strategy carry TRUST_INDEX_DATE_KEY and generate_feed() keeps
+# the index date instead of the page's.
+
+EDS_GENERIC_INDEX_PATH = "/query-index.json"
+EDS_DATE_KEYS = ("publisheddate", "publishdate", "date", "published")
+TRUST_INDEX_DATE_KEY = "trust_index_date"
+
+
+def eds_index_urls(blog_url: str) -> list[str]:
+    """Return the conventional same-host EDS sheet index URLs for a blog URL."""
+    parsed = urlparse(blog_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return []
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    urls = []
+    segments = [s for s in parsed.path.split("/") if s]
+    if segments:
+        urls.append(f"{base}/{segments[0]}-index.json")
+    urls.append(base + EDS_GENERIC_INDEX_PATH)
+    return urls
+
+
+def eds_date_to_str(value: Any) -> str:
+    """Convert an EDS sheet date cell (epoch seconds, or a date string) to a date string."""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, int | float):
+        if value <= 0:
+            return ""
+        try:
+            return datetime.fromtimestamp(value, UTC).isoformat(timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def eds_sheet_to_articles(blog_url: str, data: Any) -> list[dict[str, str]]:
+    """Convert an EDS sheet index into articles under the blog URL's path."""
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        return []
+    parsed_blog = urlparse(blog_url)
+    base = f"{parsed_blog.scheme}://{parsed_blog.netloc}"
+    prefix = parsed_blog.path.rstrip("/") + "/"
+
+    articles: dict[str, dict[str, str]] = {}
+    for row in data["data"]:
+        if not isinstance(row, dict):
+            continue
+        title = row.get("title")
+        path = row.get("path")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(path, str) or not path.startswith(prefix):
+            continue
+        article_url = urljoin(base + "/", path)
+        # The sheet is untrusted remote JSON: stay on the blog's own host.
+        parsed_article = urlparse(article_url)
+        if (
+            parsed_article.scheme not in ("http", "https")
+            or parsed_article.netloc != parsed_blog.netloc
+            or article_url in articles
+        ):
+            continue
+        lowered = {str(k).lower(): v for k, v in row.items()}
+        date_str = next(
+            (d for k in EDS_DATE_KEYS if (d := eds_date_to_str(lowered.get(k)))), ""
+        )
+        article = {"url": article_url, "title": title.strip(), "date_str": date_str}
+        if date_str:
+            article[TRUST_INDEX_DATE_KEY] = "1"
+        description = row.get("description")
+        if isinstance(description, str) and description.strip():
+            article["description"] = description.strip()
+        articles[article_url] = article
+    return list(articles.values())
+
+
+def scrape_index_eds_sheet(blog_url: str) -> list[dict[str, str]]:
+    """Try the conventional same-host AEM Edge Delivery Services sheet indexes."""
+    for index_url in eds_index_urls(blog_url):
+        try:
+            data = fetch_json(index_url)
+        except FETCH_ERRORS as e:
+            log.info("No EDS sheet index at %s: %s", index_url, e)
+            continue
+        articles = eds_sheet_to_articles(blog_url, data)
+        if articles:
+            return articles
+    return []
+
+
 # ── Obsidian Publish fallback ───────────────────────────────────────────────
 #
 # Obsidian Publish sites (e.g. chomp.ie) serve a bare app shell: no post
@@ -1036,6 +1139,15 @@ INDEX_STRATEGY_NEXTDATA = "nextdata"
 INDEX_STRATEGY_ANCHORS_RELAXED = "anchors_relaxed"
 INDEX_STRATEGY_PUBLIC_JSON = "public_json"
 INDEX_STRATEGY_OBSIDIAN = "obsidian_publish"
+INDEX_STRATEGY_EDS_SHEET = "eds_sheet"
+
+# Strategies that fetch their own URL instead of parsing the blog's HTML,
+# in fallback order. A feed remembered to need one of these skips the HTML
+# fetch entirely (see scrape_index).
+JSON_INDEX_STRATEGIES: dict[str, Callable[[str], list[dict[str, str]]]] = {
+    INDEX_STRATEGY_PUBLIC_JSON: scrape_index_public_blog_json,
+    INDEX_STRATEGY_EDS_SHEET: scrape_index_eds_sheet,
+}
 
 
 def _try_html_index_strategy(
@@ -1060,8 +1172,8 @@ def scrape_index(
 
     `known_strategy` is the strategy that worked last time (from the
     cache), if any -- trying it first avoids re-probing every strategy on
-    every run. This matters most for INDEX_STRATEGY_PUBLIC_JSON, which
-    fetches a completely different URL from the blog's HTML page: a site
+    every run. This matters most for the JSON_INDEX_STRATEGIES, which
+    fetch a completely different URL from the blog's HTML page: a site
     known to only work that way skips fetching the (unused) HTML index
     entirely, instead of paying for both requests forever. If the known
     strategy comes up empty (e.g. the site changed layout), this falls
@@ -1075,10 +1187,10 @@ def scrape_index(
     article_list: list[dict[str, str]] = []
     used_strategy = ""
 
-    if known_strategy == INDEX_STRATEGY_PUBLIC_JSON:
-        article_list = scrape_index_public_blog_json(blog_url)
+    if known_strategy in JSON_INDEX_STRATEGIES:
+        article_list = JSON_INDEX_STRATEGIES[known_strategy](blog_url)
         if article_list:
-            used_strategy = INDEX_STRATEGY_PUBLIC_JSON
+            used_strategy = known_strategy
 
     if not article_list:
         try:
@@ -1105,11 +1217,15 @@ def scrape_index(
                     log.info("Using '%s' index strategy", strategy_name)
                 break
 
-        if not article_list and known_strategy != INDEX_STRATEGY_PUBLIC_JSON:
-            article_list = scrape_index_public_blog_json(blog_url)
+        for strategy_name, strategy in JSON_INDEX_STRATEGIES.items():
             if article_list:
-                log.info("Using '%s' index strategy", INDEX_STRATEGY_PUBLIC_JSON)
-                used_strategy = INDEX_STRATEGY_PUBLIC_JSON
+                break
+            if strategy_name == known_strategy:
+                continue  # Already tried (and failed) above.
+            article_list = strategy(blog_url)
+            if article_list:
+                log.info("Using '%s' index strategy", strategy_name)
+                used_strategy = strategy_name
 
     def sort_key(item: dict[str, str]) -> datetime:
         dt = parse_date(item["date_str"])
@@ -1249,7 +1365,7 @@ def generate_feed(
             a["description"] = meta["description"]
         if meta.get("image"):
             a["image"] = meta["image"]
-        if meta.get("date"):
+        if meta.get("date") and not a.get(TRUST_INDEX_DATE_KEY):
             a["date"] = meta["date"]
         time.sleep(DELAY)
 

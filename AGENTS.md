@@ -80,6 +80,26 @@ uv run pytest
   dependencies to make mypy quieter. `urllib3` ships its own inline types
   (`py.typed`), so it doesn't need an override.
 
+## Versioning and releases
+
+Every change that affects behavior or packaging gets a version bump in
+`pyproject.toml` (`[project] version`), then `uv lock` so `uv.lock` agrees.
+Pure docs/CI changes and Dependabot dependency bumps don't need one. Use
+semantic versioning on the `0.x` line: a new index strategy or other
+feature bumps the minor version, and a fix bumps the patch version.
+`HONEST_USER_AGENT` reads the version from the installed package metadata,
+so don't hardcode the version anywhere else.
+
+Each version gets an entry at the top of `CHANGELOG.md` and a GitHub
+release tagged `vX.Y.Z` whose notes are that entry
+(`gh release create vX.Y.Z --title vX.Y.Z --notes-file <entry>`). Tag and
+release only after the commit is on `main` and CI is green.
+
+When a version adds support for a site that *used to* publish a working
+RSS/Atom feed and dropped it, name the site in the entry's
+"Hall of shame" section. Say what the feed used to be, what replaced it,
+and when this was noticed. Keep it factual: the site, the URL, what broke.
+
 ## Dependency policy
 
 Default to stdlib. Adding a new third-party dependency should be a
@@ -161,6 +181,26 @@ Notes with no date anywhere (common — `Last-Modified` on `/access/` is the
 whole site's last republish, so it's deliberately not used) get the current
 time like any other undated article.
 
+`scrape_index_eds_sheet` (`INDEX_STRATEGY_EDS_SHEET`, tried last, after
+`public_json`) handles Adobe Experience Manager Edge Delivery Services
+sites — e.g. infoblox.com/blog, which moved there from WordPress and
+dropped its RSS feed (`/blog/feed` now 404s, and the leftover WordPress
+`/feed/` is a valid but permanently empty RSS document). The HTML is an
+empty `content-listing` block shell; the post list is fetched
+client-side from a same-host sheet JSON (`{"data": [{path, title,
+description, publishedDate, ...}], ":type": "sheet"}`). `eds_index_urls`
+tries `/<first-path-segment>-index.json` then `/query-index.json`; only
+rows whose `path` sits under the blog URL's path are kept. Dates are Unix
+epoch seconds. EDS article pages' `published-time` meta tag is the last
+*republish* time, not the post date, so these articles carry
+`TRUST_INDEX_DATE_KEY` and `generate_feed` won't let the article page's
+date override the index date.
+
+Like `public_json`, the EDS strategy fetches its own URL instead of parsing
+the HTML `soup`. Both are registered in `JSON_INDEX_STRATEGIES`, and
+`scrape_index` handles every strategy in that dict the same way. A new
+fetch-its-own-URL strategy belongs there too, not as another special case.
+
 Each strategy is deliberately generic (keyed off shape-matching — presence
 of `__NEXT_DATA__`, a JSON list of dicts with title/url/date-ish keys, or
 (for `scrape_index_anchors_relaxed`) a large-enough group of same-host
@@ -188,8 +228,9 @@ To keep that a one-time cost instead of a permanent tax:
   first run and there's no known strategy yet) does it fall back to probing
   all strategies in the default order. Whichever strategy actually produced
   articles is written back to the cache.
-- Critically, when `known_strategy == INDEX_STRATEGY_PUBLIC_JSON`,
-  `scrape_index` tries it *before* fetching the blog's HTML page at all —
+- Critically, when `known_strategy` is one of `JSON_INDEX_STRATEGIES`
+  (`public_json`, `eds_sheet`), `scrape_index` tries it *before* fetching
+  the blog's HTML page at all —
   since that strategy doesn't use the HTML `soup`, a site known to need it
   costs exactly one request per run (the JSON fetch), not two (HTML fetch
   that goes nowhere, plus the JSON fetch). Preserve this ordering if you

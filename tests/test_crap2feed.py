@@ -26,6 +26,7 @@ from crap2feed import (
     score_nextdata_post_list,
     scrape_index_anchors,
     scrape_index_anchors_relaxed,
+    scrape_index_article_cards,
     title_from_url,
     to_rfc3339,
     xml_escape,
@@ -312,6 +313,52 @@ class TestScrapeIndexAnchorsRelaxed:
         soup = BeautifulSoup(html, "html.parser")
         articles = scrape_index_anchors_relaxed("https://example.com/blog", soup)
         assert "https://example.com/blog" not in {a["url"] for a in articles}
+
+
+class TestScrapeIndexArticleCards:
+    """Tests for scrape_index_article_cards()."""
+
+    NTOP_LIKE_HTML = """
+    <html><body>
+      <nav><a href="../tag/some-long-tag/">some long tag</a></nav>
+      <section class="feed">
+        <article class="entry"><div class="txt">
+          <p class="meta"><time datetime="2026-11-07T16:54:27">Nov 7, 2026</time></p>
+          <h2><a href="../detecting-a-cve-using-ndpi/">Detecting a CVE using nDPI</a></h2>
+          <p class="chips"><a href="../category/ndpi/">nDPI</a></p>
+        </div></article>
+        <article class="entry"><div class="txt">
+          <p class="meta">Oct 20, 2026</p>
+          <h2><a href="../how-we-redesigned-search/?utm=x">How we redesigned search</a></h2>
+        </div></article>
+        <article class="entry"><h2><a href="https://evil.example/off-host-post/">Off host</a></h2></article>
+        <article class="entry"><p>No heading link here</p></article>
+      </section>
+    </body></html>
+    """
+
+    def test_takes_heading_links_from_article_cards(self) -> None:
+        """Each card yields its heading link, resolved against the index, ignoring chips and off-host links."""
+        soup = BeautifulSoup(self.NTOP_LIKE_HTML, "html.parser")
+        articles = scrape_index_article_cards("https://www.ntop.org/blog/", soup)
+        assert articles == [
+            {
+                "url": "https://www.ntop.org/detecting-a-cve-using-ndpi/",
+                "title": "Detecting a CVE using nDPI",
+                "date_str": "2026-11-07T16:54:27",
+            },
+            {
+                "url": "https://www.ntop.org/how-we-redesigned-search/",
+                "title": "How we redesigned search",
+                "date_str": "Oct 20, 2026",
+            },
+        ]
+
+    def test_requires_more_than_one_card(self) -> None:
+        """A page with a single <article> (e.g. an article page) is not a post index."""
+        html = '<html><body><article><h1><a href="/a-post/">A post</a></h1></article></body></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        assert scrape_index_article_cards("https://example.com/blog/", soup) == []
 
 
 class TestPublicBlogIndexItemsToArticles:

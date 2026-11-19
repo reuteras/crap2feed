@@ -1057,6 +1057,67 @@ def scrape_index_anchors(
     return articles
 
 
+MIN_ARTICLE_CARDS = 2
+
+
+def scrape_index_article_cards(
+    blog_url: str, soup: BeautifulSoup
+) -> list[dict[str, str]]:
+    """Scrape post links from <article> "cards" whose heading links to the post.
+
+    Some blogs (e.g. www.ntop.org/blog/) publish every post at the site
+    root (/<slug>/), not under the index's own path, so scrape_index_anchors
+    finds nothing -- and since each post has its own first path segment,
+    scrape_index_anchors_relaxed's largest group ends up being /tag/ or
+    /category/ links instead. The markup itself is unambiguous, though:
+    each post is an <article> element whose heading (<h2><a href>) links to
+    it. Only that heading link is taken from each card, so category/tag
+    chips and "Read more" links inside the card are ignored. Dates come from
+    a <time datetime> inside the card, falling back to a date in its text.
+    """
+    blog_netloc = urlparse(blog_url).netloc
+    articles: dict[str, dict[str, str]] = {}
+
+    for card in soup.find_all("article"):
+        link = None
+        for heading in card.find_all(LINK_HEADING_TAGS):
+            link = heading.find("a", href=True)
+            if link is not None:
+                break
+        if link is None:
+            continue
+
+        href = str(link["href"]).split("?")[0].split("#")[0]
+        full_url = urljoin(blog_url, href)
+        # Same same-host/scheme restriction as scrape_index_anchors -- this
+        # is still untrusted, remote content.
+        full_parsed = urlparse(full_url)
+        if full_parsed.scheme not in ("http", "https"):
+            continue
+        if full_parsed.netloc != blog_netloc:
+            continue
+        if full_url in articles:
+            continue
+
+        time_tag = card.find("time")
+        date_str = str(time_tag.get("datetime") or "") if time_tag else ""
+        if not parse_date(date_str):
+            # Search only this card's text: walking up past the card (as
+            # find_date_near does) could pick up a neighbouring post's date.
+            m = DATE_RE.search(card.get_text(" ", strip=True))
+            date_str = m.group(0) if m else ""
+
+        articles[full_url] = {
+            "url": full_url,
+            "title": link.get_text(" ", strip=True),
+            "date_str": date_str,
+        }
+
+    if len(articles) < MIN_ARTICLE_CARDS:
+        return []
+    return list(articles.values())
+
+
 MIN_RELAXED_GROUP_SIZE = 3
 
 
@@ -1136,6 +1197,7 @@ def scrape_index_anchors_relaxed(
 
 INDEX_STRATEGY_ANCHORS = "anchors"
 INDEX_STRATEGY_NEXTDATA = "nextdata"
+INDEX_STRATEGY_ARTICLE_CARDS = "article_cards"
 INDEX_STRATEGY_ANCHORS_RELAXED = "anchors_relaxed"
 INDEX_STRATEGY_PUBLIC_JSON = "public_json"
 INDEX_STRATEGY_OBSIDIAN = "obsidian_publish"
@@ -1158,6 +1220,8 @@ def _try_html_index_strategy(
         return list(scrape_index_anchors(blog_url, soup).values())
     if name == INDEX_STRATEGY_NEXTDATA:
         return scrape_index_nextdata(blog_url, soup)
+    if name == INDEX_STRATEGY_ARTICLE_CARDS:
+        return scrape_index_article_cards(blog_url, soup)
     if name == INDEX_STRATEGY_ANCHORS_RELAXED:
         return scrape_index_anchors_relaxed(blog_url, soup)
     if name == INDEX_STRATEGY_OBSIDIAN:
@@ -1202,6 +1266,7 @@ def scrape_index(
         html_strategies = [
             INDEX_STRATEGY_ANCHORS,
             INDEX_STRATEGY_NEXTDATA,
+            INDEX_STRATEGY_ARTICLE_CARDS,
             INDEX_STRATEGY_ANCHORS_RELAXED,
             INDEX_STRATEGY_OBSIDIAN,
         ]

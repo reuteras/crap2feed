@@ -184,7 +184,8 @@ a container" below.
 - The index page can be scraped several different ways (plain `<a>` links
   nested under the index's own path, the same links without that nesting
   requirement for blogs whose articles live under a different path than
-  their index, an embedded `__NEXT_DATA__` post list, an Obsidian Publish
+  their index, an embedded `__NEXT_DATA__` post list, the heading links of
+  `<article>` cards for blogs whose posts live at the site root, an Obsidian Publish
   note index, a site's public JSON blog index, an Edge Delivery Services
   sheet index), tried in order until one works. Once a feed's working strategy is known,
   it's remembered in the cache and tried first on every later run instead

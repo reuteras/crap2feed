@@ -13,7 +13,9 @@ FROM python:3.15-slim AS runtime
 
 # uid/gid 1000 matches the default first-user uid on most Linux hosts, so a
 # bind-mounted ./something:/data (see README) needs no extra host-side chown.
-RUN groupadd --gid 1000 crap2feed \
+# apt-get upgrade: Debian security updates the official image does not have yet.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 crap2feed \
     && useradd --uid 1000 --gid crap2feed --home-dir /data --shell /usr/sbin/nologin crap2feed \
     && mkdir -p /data \
     && chown crap2feed:crap2feed /data

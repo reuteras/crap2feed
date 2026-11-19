@@ -41,7 +41,6 @@ jobs:
         include:
           - context: "."
             dockerfile: "Dockerfile"
-            env_args: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,16 +50,9 @@ jobs:
         env:
           CONTEXT: ${{ matrix.context }}
           DOCKERFILE: ${{ matrix.dockerfile }}
-          ENV_ARGS: ${{ matrix.env_args }}
         run: |
           set -euo pipefail
-          args=()
-          for name in $ENV_ARGS; do
-            value=$(sed -n "s/^${name}=//p" .env.default)
-            [ -n "$value" ] || { echo "$name not set in .env.default"; exit 1; }
-            args+=(--build-arg "$name=$value")
-          done
-          docker build --pull -f "$DOCKERFILE" "${args[@]}" -t osv-images/target "$CONTEXT"
+          docker build --pull -f "$DOCKERFILE" -t osv-images/target "$CONTEXT"
           docker save -o "$RUNNER_TEMP/image.tar" osv-images/target
 
       - name: Scan image

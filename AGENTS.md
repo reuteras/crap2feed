@@ -132,7 +132,7 @@ deliberate choice, not a convenience:
   deliberately (same review lens as any other dependency bump), not as a
   drive-by edit.
 
-## Three index-scraping strategies, tried in order until one works
+## Index-scraping strategies, tried in order until one works
 
 `scrape_index` tries `scrape_index_anchors` first (the original strategy:
 walk `<a href>` tags on the index page, requiring each link to live under
@@ -147,7 +147,18 @@ key from `NEXTDATA_LINK_KEYS`), then picks the best-scoring candidate
 (`score_nextdata_post_list`, biased toward lists that also carry date/
 description keys — a site's JSON can embed more than one dict-list shape,
 e.g. related posts alongside the full index). If that also finds nothing,
-it falls back to `scrape_index_anchors_relaxed` —
+it tries `scrape_index_article_cards` (`INDEX_STRATEGY_ARTICLE_CARDS`) —
+e.g. `www.ntop.org/blog/`, whose posts all live at the site root
+(`/<slug>/`), so no post link is under the index's path *and* each post has
+its own first path segment (which makes `anchors_relaxed` pick the
+`/tag/` links instead). It takes only the first heading link
+(`h1`–`h6 > a[href]`) inside each `<article>` element, same-host and
+same-scheme only, with the date from a `<time datetime>` in the card (else
+a `DATE_RE` match in the card's own text — not `find_date_near`, which can
+walk up past the card into a neighbour's date). It needs at least
+`MIN_ARTICLE_CARDS` cards, so a lone `<article>` on an ordinary page doesn't
+count. If that also finds nothing, it falls back to
+`scrape_index_anchors_relaxed` —
 e.g. themittenmac.com/blog, whose index lives at `/blog` but every article
 lives under the sibling path `/blogs/<slug>`, so no link on the index page
 is ever nested under the index's own path. This strategy walks the same

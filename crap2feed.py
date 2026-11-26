@@ -36,7 +36,9 @@ import shutil
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,7 +51,7 @@ from urllib.parse import quote, unquote_plus, urljoin, urlparse
 try:
     import requests
     import yaml
-    from bs4 import BeautifulSoup, Tag
+    from bs4 import BeautifulSoup, Tag, XMLParsedAsHTMLWarning
     from bs4.builder import ParserRejectedMarkup
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -284,9 +286,57 @@ def _fetch_direct_bytes(url: str) -> bytes:
     raise ValueError(f"too many redirects fetching {url}")
 
 
+# bs4's own XMLParsedAsHTMLWarning only names the line in this file that
+# called BeautifulSoup(), which says nothing about *which* feed or URL served
+# XML (e.g. in a cron mail). parse_html() logs that instead. A process-wide
+# filter (rather than warnings.catch_warnings() per call) because the
+# warnings state is global and catch_warnings() isn't thread-safe under
+# --serve.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+# Name of the feed being generated, for log context in code (like fetch())
+# that doesn't otherwise know which feed it's working for. A ContextVar, not
+# a plain global, so concurrent --serve request threads don't clobber it.
+CURRENT_FEED: ContextVar[str | None] = ContextVar("CURRENT_FEED", default=None)
+
+XML_DECL_RE = re.compile(rb"^\s*<\?xml\b", re.IGNORECASE)
+XML_FEED_ROOTS = frozenset({"rss", "feed", "rdf:rdf"})
+
+
+def parse_html(markup: bytes | str, url: str) -> BeautifulSoup:
+    """Parse fetched markup as HTML, logging context if it's really XML.
+
+    A URL that returns XML where crap2feed expected an HTML page (an index or
+    article page) usually means the site changed: the "blog" URL now serves
+    a feed or sitemap, or a scraped link pointed at one. The warning names
+    the feed, URL, and XML root element so that's diagnosable from a log.
+    """
+    raw = (
+        markup.encode("utf-8", errors="replace") if isinstance(markup, str) else markup
+    )
+    soup = BeautifulSoup(raw, "html.parser")
+    if XML_DECL_RE.match(raw.lstrip(b"\xef\xbb\xbf")) and soup.find("html") is None:
+        root = next((t for t in soup.children if isinstance(t, Tag)), None)
+        root_name = root.name if root is not None else "?"
+        hint = (
+            " (looks like an RSS/Atom feed; the site may publish a feed again)"
+            if root_name.lower() in XML_FEED_ROOTS
+            else ""
+        )
+        feed = CURRENT_FEED.get()
+        log.warning(
+            "%s%s returned an XML document <%s>, not HTML; parsing it as HTML anyway%s",
+            f"[{feed}] " if feed else "",
+            url,
+            root_name,
+            hint,
+        )
+    return soup
+
+
 def _fetch_direct(url: str) -> BeautifulSoup:
     """Fetch a URL directly and parse it into a BeautifulSoup document."""
-    return BeautifulSoup(_fetch_direct_bytes(url), "html.parser")
+    return parse_html(_fetch_direct_bytes(url), url)
 
 
 def fetch_json(url: str) -> Any:
@@ -336,7 +386,7 @@ def fetch_via_flaresolverr(url: str) -> BeautifulSoup:
     html = solution.get("response", "") if isinstance(solution, dict) else ""
     if not isinstance(html, str):
         raise TypeError(f"FlareSolverr returned a non-string page for {url}")
-    return BeautifulSoup(html, "html.parser")
+    return parse_html(html, url)
 
 
 def fetch(url: str) -> BeautifulSoup:
@@ -1392,6 +1442,19 @@ def generate_feed(
     pages we've already seen. The remembered strategy serves the same
     purpose for the index page itself: see scrape_index().
     """
+    token = CURRENT_FEED.set(cfg["name"])
+    try:
+        return _generate_feed(cfg, cache, max_items)
+    finally:
+        CURRENT_FEED.reset(token)
+
+
+def _generate_feed(
+    cfg: dict[str, str],
+    cache: dict[str, dict[str, dict[str, str]]],
+    max_items: int,
+) -> str:
+    """Do the work of generate_feed(), with CURRENT_FEED already set."""
     name = cfg["name"]
     url = cfg["url"]
     feed_cache = cache.setdefault(name, {})

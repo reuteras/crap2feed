@@ -9,6 +9,17 @@ The **Hall of shame** lists sites that used to publish a working RSS/Atom
 feed, dropped it, and are the reason crap2feed needed a new scraping
 strategy.
 
+## 0.4.1 — 2026-11-26
+
+### Fixed
+
+- When a page crap2feed expected to be HTML turns out to be an XML
+  document, it now logs a warning naming the feed, the URL and the XML
+  root element. Before, it printed only bs4's generic
+  `XMLParsedAsHTMLWarning`, which named a line in `crap2feed.py` and not
+  the site. If the root element is `<rss>`, `<feed>` or `<rdf:RDF>`, the
+  warning adds that the site may publish a feed again.
+
 ## 0.4.0 — 2026-11-19
 
 ### Added

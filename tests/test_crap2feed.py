@@ -6,11 +6,14 @@ anchor/Atom-feed generation. Network-touching functions (fetch, get_article_meta
 are out of scope here since they'd need mocked HTTP.
 """
 
+import logging
 from datetime import UTC, datetime
 
+import pytest
 from bs4 import BeautifulSoup
 
 from crap2feed import (
+    CURRENT_FEED,
     build_atom,
     eds_date_to_str,
     eds_index_urls,
@@ -20,6 +23,7 @@ from crap2feed import (
     obsidian_cache_to_articles,
     output_filename,
     parse_date,
+    parse_html,
     parse_markdown_metadata,
     parse_obsidian_siteinfo,
     public_blog_index_items_to_articles,
@@ -669,3 +673,33 @@ class TestEdsSheetIndex:
             "not a dict",
         ]
         assert eds_sheet_to_articles(url, {"data": rows}) == []
+
+
+# pytest resets warning filters per test, so crap2feed's import-time
+# filterwarnings() doesn't apply here; re-apply it for this test.
+@pytest.mark.filterwarnings("ignore::bs4.XMLParsedAsHTMLWarning")
+def test_parse_html_logs_feed_and_url_for_xml(caplog: pytest.LogCaptureFixture) -> None:
+    """XML served where HTML was expected is logged with feed name, URL, and root."""
+    xml = b'<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>'
+    token = CURRENT_FEED.set("Example")
+    try:
+        with caplog.at_level(logging.WARNING, logger="crap2feed"):
+            parse_html(xml, "https://example.com/blog/")
+    finally:
+        CURRENT_FEED.reset(token)
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert "[Example] https://example.com/blog/" in msg
+    assert "<rss>" in msg
+    assert "RSS/Atom" in msg
+
+
+def test_parse_html_quiet_for_html(caplog: pytest.LogCaptureFixture) -> None:
+    """Ordinary HTML (including XHTML with an XML declaration) logs nothing."""
+    with caplog.at_level(logging.WARNING, logger="crap2feed"):
+        parse_html("<html><body><p>hi</p></body></html>", "https://example.com/")
+        parse_html(
+            '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"></html>',
+            "https://example.com/x",
+        )
+    assert not caplog.records

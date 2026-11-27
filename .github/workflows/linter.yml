@@ -13,17 +13,19 @@ on:
 
 permissions:
   contents: read
-  # issues and pull-requests permissions let super-linter post its
-  # pass/fail summary as a pull request comment.
-  issues: write
-  pull-requests: write
-  statuses: write
 
 # A workflow run is made up of one or more jobs that can run sequentially
 # or in parallel
 jobs:
   # This workflow contains a single job called "build"
   build:
+    permissions:
+      contents: read
+      # issues and pull-requests permissions let super-linter post its
+      # pass/fail summary as a pull request comment.
+      issues: write
+      pull-requests: write
+      statuses: write
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
 
@@ -58,3 +60,23 @@ jobs:
           VALIDATE_PYTHON_RUFF_FORMAT: false
           VALIDATE_JSON_PRETTIER: false
           VALIDATE_YAML_PRETTIER: false
+
+  # The required check (ruleset required-checks) that Dependabot auto-merge
+  # waits for; see dev-docs docs/github.md.
+  checks-passed:
+    name: Checks passed
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "A job ended with: $result"
+              exit 1
+            fi
+          done
